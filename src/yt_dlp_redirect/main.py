@@ -4,27 +4,29 @@ import logging
 import subprocess
 import re
 import threading
+import platform
 from urllib.parse import quote_plus
 from logging.handlers import RotatingFileHandler
 
-# --- Constants ---
 REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
-ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
+
+if platform.system() == 'Windows':
+    ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
+else:
+    ORIGINAL_YTDLP_FILENAME = "yt-dlp-og"
+
 LOG_FILE_NAME = 'wrapper_debug.log'
 
-# --- Path Setup ---
 def get_application_path():
     """Gets the base path for the application, which is the directory of the executable."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    # For development, assume this script is in src/yt_dlp_redirect
     return os.path.dirname(os.path.abspath(__file__))
 
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
 
-# --- Logger Setup ---
 def setup_logging():
     """Configures a rotating file logger for the wrapper."""
     logger = logging.getLogger('RedirectWrapper')
@@ -33,12 +35,10 @@ def setup_logging():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     try:
-        # Use 'w' for write mode to overwrite the log on each run
         handler = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=2*1024*1024, backupCount=1)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     except Exception as e:
-        # Fallback to stderr if file logging fails
         sys.stderr.write(f"FATAL: Could not set up file logging: {e}\n")
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(formatter)
@@ -78,7 +78,6 @@ def process_and_execute(incoming_args):
         new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
         logger.info(f"Rewriting URL to: {new_url}")
         
-        # Rebuild argument list, replacing the URL and removing format specifiers
         temp_args = []
         skip_next = False
         for arg in incoming_args:
@@ -106,11 +105,9 @@ def process_and_execute(incoming_args):
             logger.log(log_level, f"[{log_prefix}] {line.strip()}")
         stream.close()
 
-    # Log stderr in a separate thread to prevent blocking
     stderr_thread = threading.Thread(target=log_stream, args=(process.stderr, logging.INFO, "yt-dlp-og-stderr"))
     stderr_thread.start()
     
-    # Read stdout, logging every line and capturing the last non-empty one
     final_url_output = ""
     with process.stdout:
         for line in iter(process.stdout.readline, ''):
@@ -128,7 +125,6 @@ def process_and_execute(incoming_args):
         logger.info(f"Successfully sent final URL to VRChat: {final_url_output}")
     else:
         logger.error(f"Original yt-dlp process failed. See logs for details.")
-        # Send a clear error message to VRChat's player
         print(f"ERROR: yt-dlp failed. See {LOG_FILE_NAME} in the VRChat Tools folder for details.")
 
     return return_code

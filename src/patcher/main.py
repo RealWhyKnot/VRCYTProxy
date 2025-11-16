@@ -7,19 +7,25 @@ import glob
 import re
 import threading
 from logging.handlers import RotatingFileHandler
+import platform
+import json
 
-# --- Constants ---
-VRCHAT_LOG_DIR = os.path.join(os.path.expanduser('~'), 'AppData', 'LocalLow', 'VRChat', 'VRChat')
-VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
 WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
-WRAPPER_EXE_NAME = 'main.exe'
-ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
-TARGET_EXE_NAME = 'yt-dlp.exe'
 POLL_INTERVAL = 2
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
+CONFIG_FILE_NAME = 'patcher_config.json'
 
-# --- Path Setup ---
+if platform.system() == 'Windows':
+    WRAPPER_EXE_NAME = 'main.exe'
+    ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
+    TARGET_EXE_NAME = 'yt-dlp.exe'
+else:  # Linux/macOS
+    WRAPPER_EXE_NAME = 'main'
+    ORIGINAL_EXE_NAME = 'yt-dlp-og'
+    TARGET_EXE_NAME = 'yt-dlp'
+
+
 def get_application_path():
     """Gets the base path for the application, accommodating both frozen and source-code execution."""
     if getattr(sys, 'frozen', False):
@@ -28,14 +34,7 @@ def get_application_path():
 
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
-SOURCE_DIR_PATH = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
-WRAPPER_SOURCE_EXE = os.path.join(SOURCE_DIR_PATH, WRAPPER_EXE_NAME)
 
-TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
-ORIGINAL_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
-REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
-
-# --- Logger Setup ---
 def setup_logging():
     """Configures a rotating file logger and a console logger."""
     logger = logging.getLogger('Patcher')
@@ -43,12 +42,10 @@ def setup_logging():
     
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Console Handler
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(formatter)
     logger.addHandler(ch)
     
-    # File Handler
     try:
         fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=2*1024*1024, backupCount=3, mode='w')
         fh.setFormatter(formatter)
@@ -60,6 +57,97 @@ def setup_logging():
 
 logger = setup_logging()
 
+
+def load_config(config_path):
+    """Loads a config file if it exists."""
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            logger.warning(f"Could not read config file at {config_path}")
+    return {}
+
+def save_config(config_path, config_data):
+    """Saves data to a config file."""
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config_data, f, indent=2)
+        return True
+    except Exception:
+        logger.error(f"Failed to save config to {config_path}", exc_info=True)
+        return False
+
+def get_platform_default_paths():
+    """Returns a list of default VRChat log paths for the current OS."""
+    system = platform.system()
+    
+    if system == 'Windows':
+        return [os.path.join(os.path.expanduser('~'), 'AppData', 'LocalLow', 'VRChat', 'VRChat')]
+    
+    elif system == 'Darwin':  # macOS
+        return [os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'VRChat', 'VRChat')]
+    
+    elif system == 'Linux':
+        return [
+            os.path.expanduser('~/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat'),
+            os.path.expanduser('~/.steam/steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat'),
+        ]
+    
+    return []
+
+def prompt_for_log_dir(config_path):
+    """Prompts the user to enter the VRChat log path and saves it."""
+    logger.warning("Could not automatically find VRChat log directory.")
+    print("--- VRChat Path Setup ---")
+    print("Could not find the VRChat log directory. Please provide it manually.")
+    print(r"Example (Windows): C:\Users\YourUser\AppData\LocalLow\VRChat\VRChat")
+    print(r"Example (Linux): /home/youruser/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat")
+    print(r"Example (macOS): /Users/YourUser/Library/Application Support/VRChat/VRChat")
+    
+    while True:
+        user_path = input("Enter VRChat log path: ").strip()
+        
+        if os.path.exists(user_path) and os.path.isdir(user_path):
+            logger.info(f"User provided valid path: {user_path}")
+            save_config(config_path, {'vrchat_log_dir': user_path})
+            print(f"Path saved to {config_path}. Thank you.")
+            return user_path
+        else:
+            print("Invalid path. Please try again.")
+
+def get_vrchat_log_dir(base_path):
+    """
+    Gets the VRChat log directory, checking config, then defaults,
+    then prompting the user.
+    """
+    config_path = os.path.join(base_path, CONFIG_FILE_NAME)
+    config = load_config(config_path)
+    
+    saved_path = config.get('vrchat_log_dir')
+    if saved_path and os.path.exists(saved_path):
+        logger.info(f"Using saved VRChat log path: {saved_path}")
+        return saved_path
+        
+    for path in get_platform_default_paths():
+        if os.path.exists(path):
+            logger.info(f"Found default VRChat log path: {path}")
+            save_config(config_path, {'vrchat_log_dir': path})
+            return path
+            
+    return prompt_for_log_dir(config_path)
+
+VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
+VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
+SOURCE_DIR_PATH = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
+WRAPPER_SOURCE_EXE = os.path.join(SOURCE_DIR_PATH, WRAPPER_EXE_NAME)
+
+TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
+ORIGINAL_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
+REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
+
+
+
 def tail_log_file(log_path, stop_event):
     """
     Monitors a log file and prints new lines to the console.
@@ -68,7 +156,6 @@ def tail_log_file(log_path, stop_event):
     logger.info(f"Starting to monitor redirector log: {log_path}")
     last_pos = 0
     
-    # On first run, fast-forward to the end of the file
     try:
         if os.path.exists(log_path):
             last_pos = os.path.getsize(log_path)
@@ -78,7 +165,6 @@ def tail_log_file(log_path, stop_event):
     while not stop_event.is_set():
         try:
             if os.path.exists(log_path):
-                # Reset position if file has shrunk (e.g., been overwritten)
                 current_size = os.path.getsize(log_path)
                 if last_pos > current_size:
                     last_pos = 0
@@ -88,11 +174,9 @@ def tail_log_file(log_path, stop_event):
                     new_lines = f.readlines()
                     if new_lines:
                         for line in new_lines:
-                            # Print a formatted version to the main console
                             print(f"[Redirector] {line.strip()}")
                         last_pos = f.tell()
         except Exception:
-            # Don't spam logs if there's a read error, just try again
             pass
         time.sleep(0.5) # Check every 500ms
     logger.info("Stopping redirector log monitor.")
@@ -106,24 +190,18 @@ def enable_patch():
     """
     logger.info("Attempting to enable patch...")
     try:
-        # First, determine if a backup of VRChat's original file is needed.
         is_vrchat_original = False
         if os.path.exists(TARGET_YTDLP_PATH):
             try:
-                # If file sizes are different, we assume it's the VRChat original.
                 if os.path.getsize(TARGET_YTDLP_PATH) != os.path.getsize(WRAPPER_SOURCE_EXE):
                     is_vrchat_original = True
             except OSError:
-                # File might have disappeared, assume it's not the original.
                 is_vrchat_original = False
         
-        # If the target file exists and we've determined it's the VRChat one, back it up.
-        # This overwrites the old backup, ensuring we always have the latest version.
         if is_vrchat_original:
             logger.info(f"VRChat's '{TARGET_EXE_NAME}' detected. Backing up to '{ORIGINAL_EXE_NAME}'...")
             os.replace(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_PATH)
 
-        # Now, copy the wrapper files and apply the patch.
         logger.info(f"Copying wrapper files from '{SOURCE_DIR_PATH}' to '{VRCHAT_TOOLS_DIR}'")
         shutil.copytree(SOURCE_DIR_PATH, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
         
@@ -162,7 +240,6 @@ def disable_patch():
             return True
         else:
             logger.warning(f"No backup ('{ORIGINAL_EXE_NAME}') found. Cannot restore.")
-            # Clean up orphan wrapper if it exists
             if os.path.exists(TARGET_YTDLP_PATH):
                 try:
                     wrapper_size = os.path.getsize(WRAPPER_SOURCE_EXE)
@@ -215,12 +292,9 @@ def get_last_instance_type(log_file):
     """
     try:
         with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-            # Seek to a reasonable buffer size from the end of the file (~16KB)
-            # This is a balance between performance and finding a recent log entry.
             file_size = os.path.getsize(log_file)
             f.seek(max(0, file_size - 16384))
             lines = f.readlines()
-            # Iterate backwards through the lines to find the most recent match first
             for line in reversed(lines):
                 instance_type = parse_instance_type_from_line(line)
                 if instance_type:
@@ -244,7 +318,6 @@ def main():
         input("Press Enter to exit...")
         sys.exit(1)
 
-    # --- Start Redirector Log Tailing Thread ---
     stop_event = threading.Event()
     log_tail_thread = threading.Thread(
         target=tail_log_file,
@@ -256,7 +329,6 @@ def main():
     current_log_file = None
     last_pos = 0
     
-    # --- Initial State Setup ---
     logger.info("Performing startup scan to set initial patch state...")
     latest_log_file = find_latest_log_file()
     if latest_log_file:
@@ -282,7 +354,6 @@ def main():
         logger.info("Startup: No VRChat logs found. Enabling patch by default.")
         enable_patch()
 
-    # --- Monitoring Loop ---
     logger.info("Startup complete. Now monitoring for new instance joins...")
     try:
         while True:

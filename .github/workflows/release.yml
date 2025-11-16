@@ -60,7 +60,8 @@ jobs:
         uses: crazy-max/ghaction-virustotal@v4
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
-          path: ${{ env.ARCHIVE_NAME }}
+          files: ${{ env.ARCHIVE_NAME }}
+          request_rate: 4
 
       - name: Append to Release Body
         id: body

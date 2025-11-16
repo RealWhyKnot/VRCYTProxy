@@ -41,7 +41,7 @@ jobs:
       
       - name: Prepare Release Archive (Windows)
         if: runner.os == 'Windows'
-        id: archive_info
+        # id: archive_info <-- This line was removed
         run: |
           $ARCHIVE_NAME = "VRCYTProxy-Windows.zip"
           Compress-Archive -Path dist\* -DestinationPath $ARCHIVE_NAME
@@ -49,7 +49,7 @@ jobs:
       
       - name: Prepare Release Archive (Linux/macOS)
         if: runner.os != 'Windows'
-        id: archive_info
+        # id: archive_info <-- This line was removed (was line 52)
         run: |
           ARCHIVE_NAME="VRCYTProxy-${{ runner.os }}.zip"
           cd dist

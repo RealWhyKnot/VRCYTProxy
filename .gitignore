@@ -12,8 +12,6 @@ venv/
 build/
 dist/
 *.spec
-_build_internal.bat
-build_log.txt
 
 # Distribution / packaging
 .Python

@@ -7,8 +7,11 @@ on:
 
 jobs:
   build-release:
-    name: Build and Release
-    runs-on: windows-latest
+    name: Build and Release on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout code
@@ -18,23 +21,45 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      
+      - name: Install Linux build dependencies (for bootloader)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y build-essential
 
-      - name: Run the build script
+      - name: Run the build script (Windows)
+        if: runner.os == 'Windows'
         run: |
           call build.bat
         shell: cmd
 
-      - name: Create Release Archive
+      - name: Run the build script (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x build.sh
+          ./build.sh
+      
+      - name: Create Release Archive (Windows)
+        if: runner.os == 'Windows'
         run: |
           $TAG_NAME = "${{ github.ref_name }}"
-          $ARCHIVE_NAME = "VRCYTProxy-Folder-Build-$TAG_NAME.zip"
+          $ARCHIVE_NAME = "VRCYTProxy-Windows.zip"
           Compress-Archive -Path dist\* -DestinationPath $ARCHIVE_NAME
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
-          
-      - name: Create GitHub Release
+      
+      - name: Create Release Archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          ARCHIVE_NAME="VRCYTProxy-${{ runner.os }}.zip"
+          cd dist
+          zip -r ../$ARCHIVE_NAME .
+          cd ..
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
-          files: "${{ env.ARCHIVE_NAME }}"
+          files: "VRCYTProxy-*.zip"
           body: "Automated release for ${{ github.ref_name }}. This is a folder-based build to reduce antivirus flags."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

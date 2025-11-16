@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 from logging.handlers import RotatingFileHandler
 
 # --- Constants ---
-REMOTE_SERVER_BASE = "https://vrc.whyknot.dev"
+REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
 ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
 LOG_FILE_NAME = 'wrapper_debug.log'
 

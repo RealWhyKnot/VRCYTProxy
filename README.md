@@ -14,7 +14,7 @@ This project consists of two main components:
     *   **Private Worlds**: When you are in a private world (your own, a friend's, etc.), the patcher automatically replaces VRChat's `yt-dlp.exe` with our custom redirector.
     *   **Public Worlds**: When you join a public or group world, the patcher automatically restores the original `yt-dlp.exe`. This is done to ensure compliance with VRChat's security model, as the proxy URL is not whitelisted.
 
-2.  **The Redirector (`yt-dlp-redirect.exe`)**: This is the custom executable that gets renamed to `yt-dlp.exe`. When VRChat calls it to resolve a YouTube URL, it doesn't download the video itself. Instead, it rewrites the URL to point to a proxy server (`https://vrc.whyknot.dev`) and returns the new URL to VRChat. For any non-YouTube URLs, it simply passes the request to the original `yt-dlp.exe` (which was backed up as `yt-dlp-og.exe`).
+2.  **The Redirector (`yt-dlp-redirect.exe`)**: This is the custom executable that gets renamed to `yt-dlp.exe`. When VRChat calls it to resolve a YouTube URL, it doesn't download the video itself. Instead, it rewrites the URL to point to a proxy server (`https://proxy.whyknot.dev`) and returns the new URL to VRChat. For any non-YouTube URLs, it simply passes the request to the original `yt-dlp.exe` (which was backed up as `yt-dlp-og.exe`).
 
 This dynamic, instance-aware patching ensures that the proxy is only used when it's allowed, providing a seamless experience without compromising security.
 

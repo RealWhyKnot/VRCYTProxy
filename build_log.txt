@@ -1,0 +1,80 @@
+[1/5] Setting up Python environment...
+
+[Step 2/5] Installing dependencies (with custom bootloader)...
+NOTE: This step compiles the PyInstaller bootloader and requires a C compiler.
+For Windows, please ensure you have the Visual C++ build tools installed.
+
+Requirement already satisfied: pip in d:\github\wkyoutubeproxy\.venv\lib\site-packages (25.2)
+Collecting pip
+  Using cached pip-25.3-py3-none-any.whl.metadata (4.7 kB)
+Using cached pip-25.3-py3-none-any.whl (1.8 MB)
+Installing collected packages: pip
+  Attempting uninstall: pip
+    Found existing installation: pip 25.2
+    Uninstalling pip-25.2:
+      Successfully uninstalled pip-25.2
+Successfully installed pip-25.3
+Collecting pyinstaller
+  Downloading pyinstaller-6.16.0-py3-none-win_amd64.whl.metadata (8.5 kB)
+Collecting altgraph (from pyinstaller)
+  Downloading altgraph-0.17.4-py2.py3-none-any.whl.metadata (7.3 kB)
+Collecting packaging>=22.0 (from pyinstaller)
+  Downloading packaging-25.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting pefile!=2024.8.26,>=2022.5.30 (from pyinstaller)
+  Downloading pefile-2023.2.7-py3-none-any.whl.metadata (1.4 kB)
+Collecting pyinstaller-hooks-contrib>=2025.8 (from pyinstaller)
+  Downloading pyinstaller_hooks_contrib-2025.9-py3-none-any.whl.metadata (16 kB)
+Collecting pywin32-ctypes>=0.2.1 (from pyinstaller)
+  Downloading pywin32_ctypes-0.2.3-py3-none-any.whl.metadata (3.9 kB)
+Collecting setuptools>=42.0.0 (from pyinstaller)
+  Downloading setuptools-80.9.0-py3-none-any.whl.metadata (6.6 kB)
+Downloading pyinstaller-6.16.0-py3-none-win_amd64.whl (1.4 MB)
+   ---------------------------------------- 1.4/1.4 MB 44.1 MB/s  0:00:00
+Downloading packaging-25.0-py3-none-any.whl (66 kB)
+Downloading pefile-2023.2.7-py3-none-any.whl (71 kB)
+Downloading pyinstaller_hooks_contrib-2025.9-py3-none-any.whl (444 kB)
+Downloading pywin32_ctypes-0.2.3-py3-none-any.whl (30 kB)
+Downloading setuptools-80.9.0-py3-none-any.whl (1.2 MB)
+   ---------------------------------------- 1.2/1.2 MB 121.9 MB/s  0:00:00
+Downloading altgraph-0.17.4-py2.py3-none-any.whl (21 kB)
+Installing collected packages: altgraph, setuptools, pywin32-ctypes, pefile, packaging, pyinstaller-hooks-contrib, pyinstaller
+  Attempting uninstall: altgraph
+    Found existing installation: altgraph 0.17.4
+    Uninstalling altgraph-0.17.4:
+      Successfully uninstalled altgraph-0.17.4
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 80.9.0
+    Uninstalling setuptools-80.9.0:
+      Successfully uninstalled setuptools-80.9.0
+  Attempting uninstall: pywin32-ctypes
+    Found existing installation: pywin32-ctypes 0.2.3
+    Uninstalling pywin32-ctypes-0.2.3:
+      Successfully uninstalled pywin32-ctypes-0.2.3
+  Attempting uninstall: pefile
+    Found existing installation: pefile 2023.2.7
+    Uninstalling pefile-2023.2.7:
+      Successfully uninstalled pefile-2023.2.7
+  Attempting uninstall: packaging
+    Found existing installation: packaging 25.0
+    Uninstalling packaging-25.0:
+      Successfully uninstalled packaging-25.0
+  Attempting uninstall: pyinstaller-hooks-contrib
+    Found existing installation: pyinstaller-hooks-contrib 2025.9
+    Uninstalling pyinstaller-hooks-contrib-2025.9:
+      Successfully uninstalled pyinstaller-hooks-contrib-2025.9
+  Attempting uninstall: pyinstaller
+    Found existing installation: pyinstaller 6.16.0
+    Uninstalling pyinstaller-6.16.0:
+      Successfully uninstalled pyinstaller-6.16.0
+
+Successfully installed altgraph-0.17.4 packaging-25.0 pefile-2023.2.7 pyinstaller-6.16.0 pyinstaller-hooks-contrib-2025.9 pywin32-ctypes-0.2.3 setuptools-80.9.0
+Environment ready.
+
+[3/5] Cleaning previous build and dist directories...
+Directories cleaned.
+
+[4/5] Building executables (folder mode)...
+
+[5/5] Assembling final application in 'dist'...
+Assembly complete.
+

@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build, Scan, and Release
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  build-release:
+  build-and-release:
     name: Build and Release on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     permissions:
@@ -26,12 +26,11 @@ jobs:
       
       - name: Install Linux build dependencies (for bootloader)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential
 
       - name: Run the build script (Windows)
         if: runner.os == 'Windows'
-        run: |
-          call build.bat
+        run: call build.bat
         shell: cmd
 
       - name: Run the build script (Linux/macOS)
@@ -40,28 +39,44 @@ jobs:
           chmod +x build.sh
           ./build.sh
       
-      - name: Create Release Archive (Windows)
+      - name: Prepare Release Archive (Windows)
         if: runner.os == 'Windows'
+        id: archive_info
         run: |
-          $TAG_NAME = "${{ github.ref_name }}"
           $ARCHIVE_NAME = "VRCYTProxy-Windows.zip"
           Compress-Archive -Path dist\* -DestinationPath $ARCHIVE_NAME
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
       
-      - name: Create Release Archive (Linux/macOS)
+      - name: Prepare Release Archive (Linux/macOS)
         if: runner.os != 'Windows'
+        id: archive_info
         run: |
-          TAG_NAME="${{ github.ref_name }}"
           ARCHIVE_NAME="VRCYTProxy-${{ runner.os }}.zip"
           cd dist
           zip -r ../$ARCHIVE_NAME .
           cd ..
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
 
-      - name: Upload Release Assets
+      - name: Scan with VirusTotal
+        id: virustotal
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          path: ${{ env.ARCHIVE_NAME }}
+
+      - name: Append to Release Body
+        id: body
+        run: |
+          echo "### ${{ matrix.os }}" >> release_body.md
+          echo "| File | VirusTotal Report |" >> release_body.md
+          echo "|------|-------------------|" >> release_body.md
+          echo "| \`${{ env.ARCHIVE_NAME }}\` | [View Report](${{ steps.virustotal.outputs.link }}) |" >> release_body.md
+          echo "" >> release_body.md
+        shell: bash
+
+      - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
-          files: "VRCYTProxy-*.zip"
-          body: "Automated release for ${{ github.ref_name }}. This is a folder-based build to reduce antivirus flags."
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ env.ARCHIVE_NAME }}
+          body_path: release_body.md
+          append_body: true

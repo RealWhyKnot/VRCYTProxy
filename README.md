@@ -20,8 +20,8 @@ This dynamic, instance-aware patching ensures that the proxy is only used when i
 
 ## Usage
 
-1.  Download the latest release from the [GitHub Releases](https://github.com/your-username/WKYoutubeProxy/releases) page.
-2.  Extract the `WKYoutubeProxy` folder somewhere convenient.
+1.  Download the latest release from the [GitHub Releases](https://github.com/RealWhyKnot/VRCYTProxy/releases) page.
+2.  Extract the downloaded `.zip` file somewhere convenient.
 3.  Run `patcher.exe`.
 4.  A console window will appear, showing the patcher's status. You can minimize this window.
 5.  Launch VRChat and enjoy! The patcher will handle everything in the background.
@@ -30,7 +30,7 @@ To stop the patcher, simply close the console window. It will automatically clea
 
 ## How to Run
 
-After building from source or extracting a release `.zip` file, you will have a single application folder (e.g., `dist/` or `WKYoutubeProxy-Folder-Build-v1.0/`). The structure will look like this:
+After building from source or extracting a release `.zip` file, you will have a single application folder (e.g., `dist/` or the extracted contents of `VRCYTProxy-Windows.zip`). The structure will look like this:
 
 ```
 <application_folder>/
@@ -50,8 +50,8 @@ If you want to build the project yourself, you'll need Python 3. A single script
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/VRCYTProxy.git
-    cd WKYoutubeProxy
+    git clone https://github.com/RealWhyKnot/VRCYTProxy.git
+    cd VRCYTProxy
     ```
 
 2.  **Run the build script for your OS:**

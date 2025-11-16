@@ -6,11 +6,9 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
-    name: Build and Release on ${{ matrix.os }}
+  build:
+    name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -55,27 +53,81 @@ jobs:
           cd ..
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
 
-      - name: Scan with VirusTotal
-        id: virustotal
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-${{ matrix.os }}
+          path: ${{ env.ARCHIVE_NAME }}
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Scan Windows Asset
+        id: scan-windows
         uses: crazy-max/ghaction-virustotal@v4
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
-          files: ${{ env.ARCHIVE_NAME }}
+          files: artifacts/release-asset-windows-latest/VRCYTProxy-Windows.zip
           request_rate: 4
 
-      - name: Append to Release Body
+      - name: Scan Linux Asset
+        id: scan-linux
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: artifacts/release-asset-ubuntu-latest/VRCYTProxy-Linux.zip
+          request_rate: 4
+
+      - name: Scan macOS Asset
+        id: scan-macos
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: artifacts/release-asset-macos-latest/VRCYTProxy-macOS.zip
+          request_rate: 4
+
+      - name: Assemble Release Body
         id: body
         run: |
-          echo "### ${{ matrix.os }}" >> release_body.md
+          VT_ANALYSIS_WIN="${{ steps.scan-windows.outputs.analysis }}"
+          VT_ANALYSIS_LINUX="${{ steps.scan-linux.outputs.analysis }}"
+          VT_ANALYSIS_MACOS="${{ steps.scan-macos.outputs.analysis }}"
+
+          VT_URL_WIN="${VT_ANALYSIS_WIN#*=}"
+          VT_URL_LINUX="${VT_ANALYSIS_LINUX#*=}"
+          VT_URL_MACOS="${VT_ANALYSIS_MACOS#*=}"
+          
+          echo "### windows-latest" >> release_body.md
           echo "| File | VirusTotal Report |" >> release_body.md
           echo "|------|-------------------|" >> release_body.md
-          echo "| \`${{ env.ARCHIVE_NAME }}\` | [View Report](${{ steps.virustotal.outputs.link }}) |" >> release_body.md
+          echo "| \`VRCYTProxy-Windows.zip\` | [View Report]($VT_URL_WIN) |" >> release_body.md
+          echo "" >> release_body.md
+
+          echo "### ubuntu-latest" >> release_body.md
+          echo "| File | VirusTotal Report |" >> release_body.md
+          echo "|------|-------------------|" >> release_body.md
+          echo "| \`VRCYTProxy-Linux.zip\` | [View Report]($VT_URL_LINUX) |" >> release_body.md
+          echo "" >> release_body.md
+
+          echo "### macos-latest" >> release_body.md
+          echo "| File | VirusTotal Report |" >> release_body.md
+          echo "|------|-------------------|" >> release_body.md
+          echo "| \`VPCYTProxy-macOS.zip\` | [View Report]($VT_URL_MACOS) |" >> release_body.md
           echo "" >> release_body.md
         shell: bash
 
       - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ env.ARCHIVE_NAME }}
+          files: artifacts/release-asset-*/*.zip
           body_path: release_body.md
-          append_body: true

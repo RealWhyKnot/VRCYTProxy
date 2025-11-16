@@ -27,7 +27,7 @@ jobs:
       - name: Create Release Archive
         run: |
           $TAG_NAME = "${{ github.ref_name }}"
-          $ARCHIVE_NAME = "WKYoutubeProxy-Folder-Build-$TAG_NAME.zip"
+          $ARCHIVE_NAME = "VRCYTProxy-Folder-Build-$TAG_NAME.zip"
           Compress-Archive -Path dist\* -DestinationPath $ARCHIVE_NAME
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
           

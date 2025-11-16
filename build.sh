@@ -6,7 +6,7 @@ LOG_FILE="build_log.txt"
 # Use a function to group all commands, then pipe the output of the function to tee
 main() {
     echo "================================================="
-    echo "     WKYoutubeProxy Unified Build Script         "
+    echo "     VRCYTProxy Unified Build Script         "
     echo "================================================="
     echo
 

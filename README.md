@@ -1,6 +1,6 @@
-# WKYoutubeProxy - VRChat YouTube URL Patcher
+# VRCYTProxy - VRChat YouTube URL Patcher
 
-WKYoutubeProxy is a tool designed to work around issues with playing YouTube videos in VRChat, particularly in instances where YouTube URLs might be blocked or fail to resolve. It works by dynamically patching VRChat's `yt-dlp.exe` to redirect YouTube video requests to a proxy server.
+VRCYTProxy is a tool designed to work around issues with playing YouTube videos in VRChat, particularly in instances where YouTube URLs might be blocked or fail to resolve. It works by dynamically patching VRChat's `yt-dlp.exe` to redirect YouTube video requests to a proxy server.
 
 ## The Problem
 
@@ -50,7 +50,7 @@ If you want to build the project yourself, you'll need Python 3. A single script
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/WKYoutubeProxy.git
+    git clone https://github.com/your-username/VRCYTProxy.git
     cd WKYoutubeProxy
     ```
 

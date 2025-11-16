@@ -122,12 +122,13 @@ jobs:
           echo "### macos-latest" >> release_body.md
           echo "| File | VirusTotal Report |" >> release_body.md
           echo "|------|-------------------|" >> release_body.md
-          echo "| \`VPCYTProxy-macOS.zip\` | [View Report]($VT_URL_MACOS) |" >> release_body.md
+          echo "| \`VRCYTProxy-macOS.zip\` | [View Report]($VT_URL_MACOS) |" >> release_body.md
           echo "" >> release_body.md
         shell: bash
 
       - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
+          draft: true
           files: artifacts/release-asset-*/*.zip
           body_path: release_body.md

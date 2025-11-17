@@ -65,7 +65,7 @@ def process_and_execute(incoming_args):
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
     is_youtube_url = target_url and not is_already_proxied and re.search(r'youtube\.com|youtu\.be', target_url)
     
-    logger.info(f"Analysis: Is YouTube? {is_youtube_url}. Is already proxied? {is_already_proxied}.")
+    logger.info(f"Analysis: Is YouTube? {bool(is_youtube_url)}. Is already proxied? {is_already_proxied}.")
 
     if not os.path.exists(ORIGINAL_YTDLP_PATH):
         logger.critical(f"Original executable '{ORIGINAL_YTDLP_FILENAME}' not found at '{ORIGINAL_YTDLP_PATH}'.")

@@ -7,11 +7,11 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build on Windows
+    runs-on: windows-latest
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest]
 
     steps:
       - name: Checkout code
@@ -22,41 +22,20 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install Linux build dependencies (for bootloader)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
-
       - name: Run the build script (Windows)
-        if: runner.os == 'Windows'
         run: call build.bat
         shell: cmd
-
-      - name: Run the build script (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          chmod +x build.sh
-          ./build.sh
       
       - name: Prepare Release Archive (Windows)
-        if: runner.os == 'Windows'
         run: |
           $ARCHIVE_NAME = "VRCYTProxy-Windows.zip"
           Compress-Archive -Path dist\* -DestinationPath $ARCHIVE_NAME
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $env:GITHUB_ENV
       
-      - name: Prepare Release Archive (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: |
-          ARCHIVE_NAME="VRCYTProxy-${{ runner.os }}.zip"
-          cd dist
-          zip -r ../$ARCHIVE_NAME .
-          cd ..
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
-
-      - name: Upload Artifact
+      - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-asset-${{ matrix.os }}
+          name: release-asset-windows-latest
           path: ${{ env.ARCHIVE_NAME }}
 
   release:
@@ -80,49 +59,16 @@ jobs:
           files: artifacts/release-asset-windows-latest/VRCYTProxy-Windows.zip
           request_rate: 4
 
-      - name: Scan Linux Asset
-        id: scan-linux
-        uses: crazy-max/ghaction-virustotal@v4
-        with:
-          vt_api_key: ${{ secrets.VT_API_KEY }}
-          files: artifacts/release-asset-ubuntu-latest/VRCYTProxy-Linux.zip
-          request_rate: 4
-
-      - name: Scan macOS Asset
-        id: scan-macos
-        uses: crazy-max/ghaction-virustotal@v4
-        with:
-          vt_api_key: ${{ secrets.VT_API_KEY }}
-          files: artifacts/release-asset-macos-latest/VRCYTProxy-macOS.zip
-          request_rate: 4
-
       - name: Assemble Release Body
         id: body
         run: |
           VT_ANALYSIS_WIN="${{ steps.scan-windows.outputs.analysis }}"
-          VT_ANALYSIS_LINUX="${{ steps.scan-linux.outputs.analysis }}"
-          VT_ANALYSIS_MACOS="${{ steps.scan-macos.outputs.analysis }}"
-
           VT_URL_WIN="${VT_ANALYSIS_WIN#*=}"
-          VT_URL_LINUX="${VT_ANALYSIS_LINUX#*=}"
-          VT_URL_MACOS="${VT_ANALYSIS_MACOS#*=}"
           
-          echo "### windows-latest" >> release_body.md
-          echo "| File | VirusTotal Report |" >> release_body.md
-          echo "|------|-------------------|" >> release_body.md
+          echo "### VirusTotal Scan" >> release_body.md
+          echo "| File | Report |" >> release_body.md
+          echo "|------|----------|" >> release_body.md
           echo "| \`VRCYTProxy-Windows.zip\` | [View Report]($VT_URL_WIN) |" >> release_body.md
-          echo "" >> release_body.md
-
-          echo "### ubuntu-latest" >> release_body.md
-          echo "| File | VirusTotal Report |" >> release_body.md
-          echo "|------|-------------------|" >> release_body.md
-          echo "| \`VRCYTProxy-Linux.zip\` | [View Report]($VT_URL_LINUX) |" >> release_body.md
-          echo "" >> release_body.md
-
-          echo "### macos-latest" >> release_body.md
-          echo "| File | VirusTotal Report |" >> release_body.md
-          echo "|------|-------------------|" >> release_body.md
-          echo "| \`VRCYTProxy-macOS.zip\` | [View Report]($VT_URL_MACOS) |" >> release_body.md
           echo "" >> release_body.md
         shell: bash
 

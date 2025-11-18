@@ -8,17 +8,16 @@ import platform
 from urllib.parse import quote_plus
 from logging.handlers import RotatingFileHandler
 
+if platform.system() != 'Windows':
+    print("FATAL: This wrapper is designed to run on Windows only.", file=sys.stderr)
+    sys.exit(1)
+
 REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
 
-if platform.system() == 'Windows':
-    ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
-else:
-    ORIGINAL_YTDLP_FILENAME = "yt-dlp-og"
-
+ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
 LOG_FILE_NAME = 'wrapper_debug.log'
 
 def get_application_path():
-    """Gets the base path for the application, which is the directory of the executable."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +27,6 @@ LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
 
 def setup_logging():
-    """Configures a rotating file logger for the wrapper."""
     logger = logging.getLogger('RedirectWrapper')
     logger.setLevel(logging.INFO)
     
@@ -49,16 +47,12 @@ def setup_logging():
 logger = setup_logging()
 
 def find_url_in_args(args_list):
-    """Finds the first argument in a list that looks like a URL."""
     for arg in args_list:
         if arg.startswith('http'):
             return arg
     return None
 
 def process_and_execute(incoming_args):
-    """
-    Processes arguments from VRChat, rewrites YouTube URLs, and executes the original yt-dlp.
-    """
     target_url = find_url_in_args(incoming_args)
     logger.info(f"URL found in arguments: {target_url}")
 
@@ -100,7 +94,6 @@ def process_and_execute(incoming_args):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
 
     def log_stream(stream, log_level, log_prefix):
-        """Logs the output of a stream line by line."""
         for line in iter(stream.readline, ''):
             logger.log(log_level, f"[{log_prefix}] {line.strip()}")
         stream.close()
@@ -130,7 +123,6 @@ def process_and_execute(incoming_args):
     return return_code
 
 def main():
-    """Main entry point for the yt-dlp wrapper."""
     logger.info("--- VRChat yt-dlp Wrapper Initialized ---")
     logger.info(f"Arguments received: {sys.argv[1:]}")
     logger.info(f"Proxy server base: {REMOTE_SERVER_BASE}")

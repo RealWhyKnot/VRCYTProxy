@@ -6,7 +6,7 @@ import re
 import threading
 import platform
 from urllib.parse import quote_plus
-from logging.handlers import RotatingFileHandler
+from logging import FileHandler
 
 if platform.system() != 'Windows':
     print("FATAL: This wrapper is designed to run on Windows only.", file=sys.stderr)
@@ -33,7 +33,7 @@ def setup_logging():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     try:
-        handler = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=2*1024*1024, backupCount=1)
+        handler = FileHandler(LOG_FILE_PATH, mode='w', encoding='utf-8')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     except Exception as e:

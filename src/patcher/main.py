@@ -17,18 +17,19 @@ if platform.system() != 'Windows':
 
 class PatchState(Enum):
     UNKNOWN = auto()
-    ENABLED = auto()
-    DISABLED = auto()
-    BROKEN = auto()
+    ENABLED = auto()    # Our wrapper is yt-dlp.exe, VRC's file is in backup
+    DISABLED = auto()   # VRC's file is yt-dlp.exe
+    BROKEN = auto()     # Any other state (missing files, etc.)
 
 POLL_INTERVAL = 2  # seconds
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
 
-WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
-ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
-TARGET_EXE_NAME = 'yt-dlp.exe'
+WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe' # This is the name in resources/wrapper_files
+ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'   # This is the backup name for VRC's file
+TARGET_EXE_NAME = 'yt-dlp.exe'        # This is the file VRChat calls
+WRAPPER_SOURCE_DIR_NAME = 'wrapper_files' # Name of the subfolder in /resources
 
 def get_application_path():
     if getattr(sys, 'frozen', False):
@@ -88,7 +89,6 @@ def prompt_for_log_dir(config_path):
     
     while True:
         user_path = input("Enter VRChat log path: ").strip()
-        
         if os.path.exists(user_path) and os.path.isdir(user_path):
             logger.info(f"User provided valid path: {user_path}")
             save_config(config_path, {'vrchat_log_dir': user_path})
@@ -117,7 +117,9 @@ def get_vrchat_log_dir(base_path):
 
 VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
 VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
-SOURCE_WRAPPER_EXE = os.path.join(APP_BASE_PATH, 'resources', 'wrapper_files', WRAPPER_EXE_NAME)
+
+SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
+SOURCE_WRAPPER_FILE = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
 
 TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
 ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
@@ -127,19 +129,18 @@ REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
 def tail_log_file(log_path, stop_event):
     logger.info(f"Starting to monitor redirector log: {log_path}")
     last_pos = 0
-    
     try:
         if os.path.exists(log_path):
             last_pos = os.path.getsize(log_path)
     except OSError:
-        pass # File might not exist yet, which is fine
+        pass 
 
     while not stop_event.is_set():
         try:
             if os.path.exists(log_path):
                 current_size = os.path.getsize(log_path)
                 if last_pos > current_size:
-                    last_pos = 0 # Log was rotated or truncated
+                    last_pos = 0
                 
                 with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                     f.seek(last_pos)
@@ -150,65 +151,115 @@ def tail_log_file(log_path, stop_event):
                         last_pos = f.tell()
         except Exception:
             pass
-        time.sleep(0.5) # Check every 500ms
+        time.sleep(0.5)
     logger.info("Stopping redirector log monitor.")
 
 
-def get_patch_state():
+
+def safe_get_size(filepath):
+    try:
+        return os.path.getsize(filepath)
+    except FileNotFoundError:
+        return 0
+
+def get_patch_state(wrapper_file_size):
+    if wrapper_file_size == 0:
+        logger.critical("Wrapper file size is 0. Cannot determine state.")
+        return PatchState.BROKEN
+
+    target_size = safe_get_size(TARGET_YTDLP_PATH)
     backup_exists = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH)
-    target_exists = os.path.exists(TARGET_YTDLP_PATH)
+    is_target_our_wrapper = (target_size == wrapper_file_size)
 
-    if not target_exists and not backup_exists:
-        return PatchState.DISABLED # Clean state
-
-    if backup_exists:
-        if target_exists:
-            return PatchState.ENABLED
+    if is_target_our_wrapper:
+        if backup_exists:
+            return PatchState.ENABLED # Correct state: (target=Wrapper, backup=VRC)
         else:
-            return PatchState.BROKEN
-
-    if target_exists and not backup_exists:
+            return PatchState.BROKEN # Wrapper is active, but VRC backup is gone.
+    
+    if not is_target_our_wrapper and target_size > 0:
         return PatchState.DISABLED
+    
+    if target_size == 0:
+        if backup_exists:
+            return PatchState.BROKEN # Files are missing, but backup is weirdly there
+        else:
+            return PatchState.DISABLED # Clean slate. VRChat will regenerate.
+    
+    return PatchState.BROKEN # Catch-all
 
-    return PatchState.BROKEN
-
-def enable_patch():
-    logger.info("Enabling patch...")
+def enable_patch(wrapper_file_size, wrapper_file_list, is_waiting_flag):
     try:
         if not os.path.exists(VRCHAT_TOOLS_DIR):
             os.makedirs(VRCHAT_TOOLS_DIR)
             logger.info(f"Created Tools directory at: {VRCHAT_TOOLS_DIR}")
 
-        if os.path.exists(TARGET_YTDLP_PATH) and not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-            logger.info(f"Backing up original '{TARGET_EXE_NAME}' to '{ORIGINAL_EXE_NAME}'")
-            shutil.move(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH)
+        target_size = safe_get_size(TARGET_YTDLP_PATH)
+        is_target_our_wrapper = (target_size == wrapper_file_size)
 
-        logger.info(f"Copying wrapper to '{TARGET_YTDLP_PATH}'")
-        shutil.copyfile(SOURCE_WRAPPER_EXE, TARGET_YTDLP_PATH)
+        if not is_target_our_wrapper and target_size > 0:
+            logger.info("Enabling patch...")
+            logger.info(f"Backing up current VRChat file '{TARGET_EXE_NAME}' to '{ORIGINAL_EXE_NAME}'")
+            os.replace(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH)
+        elif is_target_our_wrapper:
+            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+                logger.error("Our wrapper is active but backup is missing! This is a broken state.")
+                return False, is_waiting_flag 
+        elif target_size == 0:
+            if not is_waiting_flag:
+                logger.warning(f"'{TARGET_EXE_NAME}' not found. Cannot create backup. Waiting for VRChat to create it.")
+            return False, True # Return True for "is_waiting"
+
+        logger.info(f"Copying wrapper files from '{SOURCE_WRAPPER_DIR}' to '{VRCHAT_TOOLS_DIR}'")
+        _remove_wrapper_files(wrapper_file_list) # Clean first
+        shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
         
-        logger.info("Patch enabled successfully.")
-        return True
+        copied_wrapper_path = os.path.join(VRCHAT_TOOLS_DIR, WRAPPER_EXE_NAME)
+        if os.path.exists(copied_wrapper_path):
+            logger.info(f"Renaming '{WRAPPER_EXE_NAME}' to '{TARGET_EXE_NAME}'")
+            os.replace(copied_wrapper_path, TARGET_YTDLP_PATH)
+            logger.info("Patch enabled successfully.")
+            return True, False # Return False for "is_waiting"
+        else:
+            logger.error(f"Copy failed, wrapper exe not found at {copied_wrapper_path} after copy.")
+            return False, is_waiting_flag 
+
     except PermissionError:
         logger.error("Permission denied. Is VRChat running? Failed to enable patch.")
-        return False
+        return False, is_waiting_flag
     except Exception:
         logger.exception("An unexpected error occurred while enabling the patch.")
-        return False
+        return False, is_waiting_flag
 
-def disable_patch():
+def _remove_wrapper_files(wrapper_file_list):
+    logger.info("Cleaning old wrapper files...")
+    for filename in wrapper_file_list:
+        paths_to_check = [
+            os.path.join(VRCHAT_TOOLS_DIR, filename),
+            os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME) # Check for renamed exe
+        ]
+        
+        for file_path in set(paths_to_check): # Use set to avoid double-checking
+            if os.path.exists(file_path):
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    logger.warning(f"Could not remove old file {file_path}: {e}")
+
+def disable_patch(wrapper_file_list):
     logger.info("Disabling patch...")
     try:
-        if os.path.exists(TARGET_YTDLP_PATH):
-            if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                logger.info(f"Removing wrapper file '{TARGET_YTDLP_PATH}'")
-                os.remove(TARGET_YTDLP_PATH)
+        _remove_wrapper_files(wrapper_file_list)
 
         if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
             logger.info(f"Restoring original '{ORIGINAL_EXE_NAME}'")
-            shutil.move(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH)
+            os.replace(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH)
             logger.info("Patch disabled successfully.")
         else:
-            logger.info("No backup found to restore. Patch is considered disabled.")
+            logger.warning("No backup found to restore. VRChat will need to regenerate the file.")
             
         return True
     except PermissionError:
@@ -218,21 +269,25 @@ def disable_patch():
         logger.exception("An unexpected error occurred while disabling the patch.")
         return False
 
-def ensure_patch_state(desired_state, current_state):
-    if current_state == desired_state:
-        logger.info(f"Patch is already in the desired state ({desired_state.name}). No action needed.")
-        return current_state
+def repair_patch(wrapper_file_list):
+    logger.warning("Patch state is BROKEN. Attempting to repair by cleaning files.")
+    logger.info("This will allow VRChat to regenerate its own yt-dlp.exe.")
+    try:
+        _remove_wrapper_files(wrapper_file_list)
 
-    logger.warning(f"State mismatch: current is {current_state.name}, desired is {desired_state.name}. Taking action.")
+        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+            os.remove(ORIGINAL_YTDLP_BACKUP_PATH)
+        
+        logger.info("Clean-up successful. New state is DISABLED.")
+        return PatchState.DISABLED
+        
+    except PermissionError:
+        logger.error("Permission denied during repair. Is VRChat running?")
+        return PatchState.BROKEN
+    except Exception:
+        logger.exception("Error during repair.")
+        return PatchState.BROKEN
 
-    if desired_state == PatchState.ENABLED:
-        if enable_patch():
-            return PatchState.ENABLED
-    elif desired_state == PatchState.DISABLED:
-        if disable_patch():
-            return PatchState.DISABLED
-    
-    return get_patch_state()
 
 def find_latest_log_file():
     try:
@@ -250,7 +305,7 @@ def parse_instance_type_from_line(line):
             return 'group' if 'group' in instance_type else instance_type
             
     if '[API] Creating world instance {' in line:
-        match = re.search(r'type:\s*([a-zA-Z0-9_]+),', line)
+        match = re.search(r'type:\s*([a-zA-Z0_]+),', line)
         if match:
             instance_type = match.group(1).lower()
             return 'group' if 'group' in instance_type else instance_type
@@ -262,8 +317,26 @@ def main():
     logger.info(f"VRChat Tools Directory: {VRCHAT_TOOLS_DIR}")
     logger.info(f"Patcher Log File: {LOG_FILE_PATH}")
     
-    if not os.path.exists(SOURCE_WRAPPER_EXE):
-        logger.critical(f"Wrapper source file not found: '{SOURCE_WRAPPER_EXE}'!")
+    try:
+        if not os.path.exists(SOURCE_WRAPPER_DIR):
+             logger.critical(f"Wrapper source directory not found: '{SOURCE_WRAPPER_DIR}'!")
+             input("Press Enter to exit..."); sys.exit(1)
+
+        WRAPPER_FILE_SIZE = safe_get_size(SOURCE_WRAPPER_FILE)
+        if WRAPPER_FILE_SIZE == 0:
+            logger.critical(f"Wrapper source file not found or is empty: '{SOURCE_WRAPPER_FILE}'!")
+            input("Press Enter to exit..."); sys.exit(1)
+        
+        WRAPPER_FILE_LIST = os.listdir(SOURCE_WRAPPER_DIR)
+        if not WRAPPER_FILE_LIST:
+            logger.critical(f"Wrapper source directory is empty: '{SOURCE_WRAPPER_DIR}'!")
+            input("Press Enter to exit..."); sys.exit(1)
+
+        logger.info(f"Wrapper exe size identified: {WRAPPER_FILE_SIZE} bytes.")
+        logger.info(f"Wrapper file list loaded ({len(WRAPPER_FILE_LIST)} files).")
+
+    except Exception as e:
+        logger.critical(f"Failed to read wrapper source files: {e}", exc_info=True)
         input("Press Enter to exit..."); sys.exit(1)
 
     stop_event = threading.Event()
@@ -277,12 +350,10 @@ def main():
     current_log_file = None
     last_pos = 0
     last_instance_type = None
-    last_known_patch_state = PatchState.UNKNOWN
+    
+    is_waiting_for_vrchat_file = False
     
     logger.info("Performing startup scan...")
-    last_known_patch_state = get_patch_state()
-    logger.info(f"Initial patch state detected: {last_known_patch_state.name}")
-
     latest_log = find_latest_log_file()
     if latest_log:
         current_log_file = latest_log
@@ -306,23 +377,42 @@ def main():
 
     if last_instance_type:
         logger.info(f"Last known instance type from logs: '{last_instance_type}'")
-        desired_state = PatchState.DISABLED if last_instance_type in ['public', 'group'] else PatchState.ENABLED
     else:
-        logger.info("No recent instance join found. Defaulting to ENABLED state.")
-        desired_state = PatchState.ENABLED
+        logger.info("No recent instance join found. Defaulting to ENABLED.")
+        last_instance_type = "private" # Default to a state that enables patch
         
-    last_known_patch_state = ensure_patch_state(desired_state, last_known_patch_state)
-
     logger.info("Startup complete. Now monitoring for changes...")
     try:
         while True:
-            current_state_on_disk = get_patch_state()
-            if current_state_on_disk != last_known_patch_state:
-                logger.warning(f"Detected patch state change on disk! Old: {last_known_patch_state.name}, New: {current_state_on_disk.name}")
-                desired_state = PatchState.DISABLED if last_instance_type in ['public', 'group'] else PatchState.ENABLED
-                logger.warning(f"Re-enforcing desired state: {desired_state.name}")
-                last_known_patch_state = ensure_patch_state(desired_state, current_state_on_disk)
+            
+            desired_state = PatchState.DISABLED if last_instance_type in ['public', 'group'] else PatchState.ENABLED
+            
+            current_state = get_patch_state(WRAPPER_FILE_SIZE)
+            
+            if current_state == PatchState.BROKEN:
+                logger.warning(f"Patch state is BROKEN. (Desired: {desired_state.name})")
+                current_state = repair_patch(WRAPPER_FILE_LIST)
+                is_waiting_for_vrchat_file = False # Reset waiting flag
 
+            elif desired_state == PatchState.ENABLED and current_state == PatchState.DISABLED:
+                if not is_waiting_for_vrchat_file:
+                    logger.warning(f"State mismatch: Desired=ENABLED, Current=DISABLED. Attempting to patch...")
+                
+                patch_success, is_waiting = enable_patch(WRAPPER_FILE_SIZE, WRAPPER_FILE_LIST, is_waiting_for_vrchat_file)
+                is_waiting_for_vrchat_file = is_waiting
+                
+                if patch_success:
+                    current_state = PatchState.ENABLED
+                
+            elif desired_state == PatchState.DISABLED and current_state == PatchState.ENABLED:
+                logger.warning(f"State mismatch: Desired=DISABLED, Current=ENABLED. Disabling patch...")
+                if disable_patch(WRAPPER_FILE_LIST):
+                    current_state = PatchState.DISABLED
+                is_waiting_for_vrchat_file = False # Reset waiting flag
+            
+            elif desired_state == current_state:
+                is_waiting_for_vrchat_file = False
+            
             latest_log = find_latest_log_file()
             if not latest_log:
                 time.sleep(POLL_INTERVAL); continue
@@ -346,17 +436,15 @@ def main():
                             if instance_type and instance_type != last_instance_type:
                                 logger.info(f"Detected new instance join: type '{instance_type}'")
                                 last_instance_type = instance_type
-                                
-                                desired_state = PatchState.DISABLED if instance_type in ['public', 'group'] else PatchState.ENABLED
-                                current_state = get_patch_state()
-                                last_known_patch_state = ensure_patch_state(desired_state, current_state)
+                                is_waiting_for_vrchat_file = False # Reset waiting flag
+                                break # Break to re-run the main state machine
             
             except FileNotFoundError:
                 logger.warning(f"Log file '{current_log_file}' disappeared. Searching for new one.")
                 current_log_file, last_pos = None, 0
             except Exception:
                 logger.exception("Error reading VRChat log file.")
-                time.sleep(POLL_INTERVAL) # Avoid spamming errors
+                time.sleep(POLL_INTERVAL)
             
             time.sleep(POLL_INTERVAL)
     
@@ -365,10 +453,10 @@ def main():
     
     finally:
         logger.info("Stopping log monitor thread...")
-        stop_event.set() # Tell the thread to stop
+        stop_event.set()
         logger.info("Performing final cleanup. Disabling patch for safety.")
-        disable_patch()
-        log_tail_thread.join(timeout=2) # Wait for thread to finish
+        disable_patch(WRAPPER_FILE_LIST)
+        log_tail_thread.join(timeout=2)
         logger.info("Patcher shut down.")
 
 if __name__ == '__main__':

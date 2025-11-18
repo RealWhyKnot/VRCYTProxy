@@ -12,6 +12,7 @@ venv/
 build/
 dist/
 *.spec
+build_log.txt
 
 # Distribution / packaging
 .Python

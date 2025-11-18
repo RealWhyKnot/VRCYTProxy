@@ -203,6 +203,9 @@ catch {
     Write-Host ""
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Check the log for details: $LogFilePath"
+    
+    Write-Host "Press any key to exit..."
+    $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
 }
 finally {
     Write-Host ""
@@ -215,6 +218,8 @@ finally {
     
     Stop-Transcript
     
-    Write-Host "Press any key to exit..."
-    $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
+    if (-not $BuildSucceeded -and $Host.UI.RawUI.KeyAvailable) {
+        Write-Host "Press any key to exit..."
+        $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
+    }
 }

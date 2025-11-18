@@ -14,7 +14,11 @@ if platform.system() != 'Windows':
 
 REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
 
-ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
+LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe" # Bundled via PyInstaller
+DENO_FILENAME = "deno.exe"
+
+ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"   # VRChat's file
+
 LOG_FILE_NAME = 'wrapper_debug.log'
 
 def get_application_path():
@@ -24,7 +28,10 @@ def get_application_path():
 
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
+
+LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
+DENO_PATH = os.path.join(APP_BASE_PATH, DENO_FILENAME)
 
 def setup_logging():
     logger = logging.getLogger('RedirectWrapper')
@@ -52,81 +59,155 @@ def find_url_in_args(args_list):
             return arg
     return None
 
+def attempt_executable(executable_path, executable_name, incoming_args, use_custom_temp_dir=False):
+    
+    if not os.path.exists(executable_path):
+        logger.error(f"Executable '{executable_name}' not found at '{executable_path}'.")
+        return None, -1
+
+    command = [executable_path] + incoming_args
+    logger.info(f"Executing command: {subprocess.list2cmdline(command)}")
+    
+    process_env = os.environ.copy()
+    
+    if use_custom_temp_dir:
+        process_env['TEMP'] = APP_BASE_PATH
+        process_env['TMP'] = APP_BASE_PATH
+        logger.info(f"Setting TEMP/TMP (temp dir) to: {APP_BASE_PATH}")
+    
+    process = subprocess.Popen(
+        command, 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.PIPE, 
+        text=True, 
+        encoding='utf-8', 
+        errors='replace',
+        env=process_env
+    )
+
+    stdout_lines = []
+    stderr_lines = []
+
+    def log_stream(stream, log_level, log_prefix, output_list):
+        try:
+            for line in iter(stream.readline, ''):
+                stripped_line = line.strip()
+                logger.log(log_level, f"[{log_prefix}] {stripped_line}")
+                output_list.append(stripped_line)
+        except Exception as e:
+            logger.error(f"Error reading stream from {log_prefix}: {e}")
+        finally:
+            stream.close()
+
+    stdout_thread = threading.Thread(target=log_stream, args=(process.stdout, logging.INFO, f"{executable_name}-stdout", stdout_lines))
+    stderr_thread = threading.Thread(target=log_stream, args=(process.stderr, logging.ERROR, f"{executable_name}-stderr", stderr_lines))
+    
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    return_code = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    
+    logger.info(f"Executable '{executable_name}' finished with exit code {return_code}.")
+    
+    final_url_output = ""
+    for line in reversed(stdout_lines):
+        if line:
+            final_url_output = line
+            break
+            
+    return final_url_output, return_code
+
 def process_and_execute(incoming_args):
     target_url = find_url_in_args(incoming_args)
     logger.info(f"URL found in arguments: {target_url}")
+
+    if not target_url:
+        logger.warning("No URL found in arguments. Passing to VRChat's yt-dlp as a fallback.")
+        final_output, return_code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args)
+        if final_output:
+            print(final_output, flush=True)
+        return return_code
 
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
     is_youtube_url = target_url and not is_already_proxied and re.search(r'youtube\.com|youtu\.be', target_url)
     
     logger.info(f"Analysis: Is YouTube? {bool(is_youtube_url)}. Is already proxied? {is_already_proxied}.")
 
-    if not os.path.exists(ORIGINAL_YTDLP_PATH):
-        logger.critical(f"Original executable '{ORIGINAL_YTDLP_FILENAME}' not found at '{ORIGINAL_YTDLP_PATH}'.")
-        sys.exit(1)
-    
-    final_args = incoming_args
     if is_youtube_url:
-        logger.info("YouTube URL detected. Rewriting arguments for proxy.")
+        logger.info("Tier 1: YouTube URL detected. Returning proxied URL directly.")
         encoded_youtube_url = quote_plus(target_url)
         new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
+        
         logger.info(f"Rewriting URL to: {new_url}")
-        
-        temp_args = []
-        skip_next = False
-        for arg in incoming_args:
-            if skip_next:
-                skip_next = False
-                continue
-            if arg == '-f':
-                logger.info("Removing '-f' format filter to prevent conflicts.")
-                skip_next = True
-                continue
-            if arg == target_url:
-                temp_args.append(new_url)
-            else:
-                temp_args.append(arg)
-        final_args = temp_args
-        
-    command = [ORIGINAL_YTDLP_PATH] + final_args
-    logger.info(f"Executing command: {' '.join(command)}")
+        print(new_url, flush=True) # Send to VRChat
+        logger.info(f"Successfully sent final URL to VRChat: {new_url}")
+        return 0 # Exit successfully
 
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-
-    def log_stream(stream, log_level, log_prefix):
-        for line in iter(stream.readline, ''):
-            logger.log(log_level, f"[{log_prefix}] {line.strip()}")
-        stream.close()
-
-    stderr_thread = threading.Thread(target=log_stream, args=(process.stderr, logging.INFO, "yt-dlp-og-stderr"))
-    stderr_thread.start()
+    if is_already_proxied:
+        logger.info("Tier 1: URL is already proxied. Passing through directly.")
+        print(target_url, flush=True) # Send to VRChat
+        logger.info(f"Successfully sent final URL to VRChat: {target_url}")
+        return 0
     
-    final_url_output = ""
-    with process.stdout:
-        for line in iter(process.stdout.readline, ''):
-            stripped_line = line.strip()
-            logger.info(f"[yt-dlp-og-stdout] {stripped_line}")
-            if stripped_line:
-                final_url_output = stripped_line
+    logger.info("Tier 2: Non-YouTube URL. Attempting to resolve with yt-dlp-latest.exe...")
     
-    return_code = process.wait()
-    logger.info(f"Original executable finished with exit code {return_code}.")
-    stderr_thread.join()
+    tier_2_args = []
+    skip_next = False
+    for arg in incoming_args:
+        if skip_next:
+            skip_next = False
+            continue
+        
+        if arg in ("--exp-allow", "--wild-allow"):
+            logger.warning(f"Removing unsupported VRChat argument: {arg}")
+            skip_next = True # Skip this argument and its value
+            continue
+            
+        tier_2_args.append(arg)
 
-    if return_code == 0:
-        print(final_url_output)
-        logger.info(f"Successfully sent final URL to VRChat: {final_url_output}")
+    js_runtime_arg = f"deno:{DENO_PATH}"
+    tier_2_args.extend(["--js-runtimes", js_runtime_arg])
+    logger.info(f"Adding JS runtime argument: --js-runtimes {js_runtime_arg}")
+
+    resolved_url, return_code = attempt_executable(
+        LATEST_YTDLP_PATH, 
+        LATEST_YTDLP_FILENAME, 
+        tier_2_args, # Use the SANITIZED args
+        use_custom_temp_dir=True 
+    )
+    
+    if return_code == 0 and resolved_url and resolved_url.startswith('http'):
+        logger.info(f"Tier 2 success. Returning URL: {resolved_url}")
+        print(resolved_url, flush=True)
+        return 0
     else:
-        logger.error(f"Original yt-dlp process failed. See logs for details.")
-        print(f"ERROR: yt-dlp failed. See {LOG_FILE_NAME} in the VRChat Tools folder for details.")
+        logger.warning(f"Tier 2 failed (Code: {return_code}) or returned invalid URL. Output: {resolved_url}")
+
+    logger.info("Tier 3: Falling back to VRChat's yt-dlp-og.exe...")
+    final_output, return_code = attempt_executable(
+        ORIGINAL_YTDLP_PATH, 
+        ORIGINAL_YTDLP_FILENAME, 
+        incoming_args # Use the ORIGINAL, unmodified args
+    )
+    
+    if final_output:
+        logger.info(f"Tier 3 finished. Returning output (URL or error) to VRChat: {final_output}")
+        print(final_output, flush=True)
+    else:
+        logger.error(f"Tier 3 finished (Code: {return_code}) but produced no output.")
+        print(f"ERROR: Tier 3 (yt-dlp-og.exe) failed. See {LOG_FILE_NAME} in the VRChat Tools folder for details.", flush=True)
 
     return return_code
 
 def main():
     logger.info("--- VRChat yt-dlp Wrapper Initialized ---")
     logger.info(f"Arguments received: {sys.argv[1:]}")
-    logger.info(f"Proxy server base: {REMOTE_SERVER_BASE}")
-    logger.info(f"Expected original exe path: {ORIGINAL_YTDLP_PATH}")
+    logger.info(f"Tier 1 (Proxy): {REMOTE_SERVER_BASE}")
+    logger.info(f"Tier 2 (Latest): {LATEST_YTDLP_PATH}")
+    logger.info(f"Tier 2 (Deno): {DENO_PATH}")
+    logger.info(f"Tier 3 (VRChat): {ORIGINAL_YTDLP_PATH}")
     
     try:
         return_code = process_and_execute(sys.argv[1:])

@@ -23,8 +23,8 @@ jobs:
           python-version: '3.11'
       
       - name: Run the build script (Windows)
-        run: call build.bat
-        shell: cmd
+        run: .\build.ps1 -Force
+        shell: powershell
       
       - name: Prepare Release Archive (Windows)
         run: |

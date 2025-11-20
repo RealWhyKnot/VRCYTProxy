@@ -23,7 +23,7 @@ jobs:
           python-version: '3.11'
       
       - name: Run the build script (Windows)
-        run: .\build.ps1 -Force
+        run: .\build.ps1 -Version ${{ github.ref_name }} -Force
         shell: powershell
       
       - name: Prepare Release Archive (Windows)

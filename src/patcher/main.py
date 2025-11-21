@@ -12,6 +12,8 @@ import json
 from enum import Enum, auto
 import urllib.request
 import urllib.error
+import atexit
+import signal
 
 if platform.system() == 'Windows':
     os.system('color')  # Enables ANSI escape sequences in Windows CMD
@@ -63,11 +65,8 @@ class Colors:
 
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
-        original_msg = record.msg
-        
         color = Colors.RESET
-        prefix = ""
-
+        
         if record.levelno >= logging.CRITICAL:
             color = Colors.BG_RED + Colors.BOLD + "\033[97m" # White text on Red BG
         elif record.levelno >= logging.ERROR:
@@ -85,10 +84,12 @@ class ColoredFormatter(logging.Formatter):
             color = Colors.RED
         elif "[VRC AVPRO]" in msg_str:
             color = Colors.YELLOW
-        elif "ENABLED" in msg_str or "Success" in msg_str or "Patch enabled" in msg_str:
+        elif "Switching to ENABLED" in msg_str or "Patch enabled" in msg_str:
             color = Colors.GREEN
-        elif "DISABLED" in msg_str:
+        elif "Switching to DISABLED" in msg_str or "Patch disabled" in msg_str:
             color = Colors.GREY
+        elif "Startup State Found" in msg_str:
+            color = Colors.MAGENTA
         
         timestamp = self.formatTime(record, self.datefmt)
         
@@ -293,6 +294,7 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
             return False, True
 
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False) 
+        
         logger.debug(f"Copying wrapper files from {SOURCE_WRAPPER_DIR}")
         shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
         
@@ -325,10 +327,13 @@ def disable_patch(wrapper_file_list):
                 logger.debug(f"Failed to delete wrapper log: {e}")
 
         if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+            if os.path.exists(TARGET_YTDLP_PATH):
+                os.remove(TARGET_YTDLP_PATH) # Ensure target is gone
+            
             os.replace(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH)
             logger.info("Patch disabled successfully.")
         else:
-            logger.warning("No backup found to restore. VRChat may need to verify integrity.")
+            logger.warning("No backup found to restore. VRChat will regenerate yt-dlp on next startup.")
         return True
     except Exception:
         logger.exception("Error disabling patch.")
@@ -383,7 +388,12 @@ def parse_instance_type_from_line(line):
             if match:
                 instance_mod = match.group(1).lower()
                 if instance_mod in ['region', 'nonce']: return None 
-                if instance_mod == 'group': return 'group_unknown'
+                
+                if instance_mod == 'group': 
+                    if 'groupAccessType(public)' in line:
+                        return 'group_public'
+                    return 'group_unknown'
+                
                 if instance_mod == 'hidden': return 'friends+'
                 if instance_mod == 'private': return 'invite'
                 return instance_mod
@@ -411,6 +421,20 @@ def check_for_game_errors(line):
     if "System.NullReferenceException" in line:
         logger.critical(f"[VRC EXCEPTION] {line}")
         return
+
+def cleanup_on_exit():
+    logger.info("Shutting down. Restoring original files...")
+    try:
+        if os.path.exists(WRAPPER_FILE_LIST_PATH):
+            with open(WRAPPER_FILE_LIST_PATH, 'r', encoding='utf-8-sig') as f:
+                files = json.load(f)
+            disable_patch(files)
+    except:
+        pass
+
+atexit.register(cleanup_on_exit)
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0))
 
 def main():
     logger.info(f"Patcher {CURRENT_VERSION} starting up...")
@@ -449,14 +473,12 @@ def main():
             with open(latest_log, 'r', encoding='utf-8', errors='replace') as f:
                 f.seek(start_pos)
                 lines = f.readlines()
-                
                 for line in reversed(lines):
                     instance_type = parse_instance_type_from_line(line)
                     if instance_type:
                         last_instance_type = instance_type
                         logger.info(f"Startup State Found: World Type = {last_instance_type}")
                         break
-                
                 last_pos = f.tell()
                 
         except Exception as e:
@@ -532,7 +554,6 @@ def main():
                                         is_waiting_for_vrchat_file = False
                                     
                                     check_for_game_errors(line)
-
             except Exception:
                 time.sleep(POLL_INTERVAL)
             

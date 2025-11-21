@@ -143,11 +143,11 @@ def process_and_execute(incoming_args):
         logger.info(f"Rewriting URL to: {new_url}")
         print(new_url, flush=True) # Send to VRChat
         logger.info(f"Successfully sent final URL to VRChat: {new_url}")
-        return 0 # Exit successfully
+        return 0 
 
     if is_already_proxied:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
-        print(target_url, flush=True) # Send to VRChat
+        print(target_url, flush=True) 
         logger.info(f"Successfully sent final URL to VRChat: {target_url}")
         return 0
     
@@ -162,7 +162,7 @@ def process_and_execute(incoming_args):
         
         if arg in ("--exp-allow", "--wild-allow"):
             logger.warning(f"Removing unsupported VRChat argument: {arg}")
-            skip_next = True # Skip this argument and its value
+            skip_next = True 
             continue
             
         tier_2_args.append(arg)
@@ -174,7 +174,7 @@ def process_and_execute(incoming_args):
     resolved_url, return_code = attempt_executable(
         LATEST_YTDLP_PATH, 
         LATEST_YTDLP_FILENAME, 
-        tier_2_args, # Use the SANITIZED args
+        tier_2_args, 
         use_custom_temp_dir=True 
     )
     
@@ -189,15 +189,15 @@ def process_and_execute(incoming_args):
     final_output, return_code = attempt_executable(
         ORIGINAL_YTDLP_PATH, 
         ORIGINAL_YTDLP_FILENAME, 
-        incoming_args # Use the ORIGINAL, unmodified args
+        incoming_args 
     )
     
     if final_output:
-        logger.info(f"Tier 3 finished. Returning output (URL or error) to VRChat: {final_output}")
+        logger.info(f"Tier 3 finished. Returning output to VRChat: {final_output}")
         print(final_output, flush=True)
     else:
         logger.error(f"Tier 3 finished (Code: {return_code}) but produced no output.")
-        print(f"ERROR: Tier 3 (yt-dlp-og.exe) failed. See {LOG_FILE_NAME} in the VRChat Tools folder for details.", flush=True)
+        sys.stderr.write(f"Wrapper Error: Tier 3 failed. Check {LOG_FILE_NAME}\n")
 
     return return_code
 

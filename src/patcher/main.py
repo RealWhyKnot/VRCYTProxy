@@ -13,10 +13,13 @@ from enum import Enum, auto
 import urllib.request
 import urllib.error
 
+if platform.system() == 'Windows':
+    os.system('color')  # Enables ANSI escape sequences in Windows CMD
+
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "BUILT-FROM-SOURCE"
+    CURRENT_VERSION = "v11.21.25-dev"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -27,22 +30,72 @@ if platform.system() != 'Windows':
 
 class PatchState(Enum):
     UNKNOWN = auto()
-    ENABLED = auto()    # Our wrapper is yt-dlp.exe, VRC's file is in backup
+    ENABLED = auto()    # Our wrapper is yt-dlp.exe
     DISABLED = auto()   # VRC's file is yt-dlp.exe
-    BROKEN = auto()     # Any other state (missing files, etc.)
+    BROKEN = auto()     # Files missing/mismatched
 
-POLL_INTERVAL = 2  # seconds
+POLL_INTERVAL = 1.0
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
 WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json' 
 
-VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024 # 10MB threshold
+VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024 # 10MB
+
+STARTUP_SCAN_DEPTH = 10 * 1024 * 1024 
 
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe' 
 ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'   
 TARGET_EXE_NAME = 'yt-dlp.exe'        
 WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
+
+class Colors:
+    RESET = "\033[0m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    GREY = "\033[90m"
+    BOLD = "\033[1m"
+    BG_RED = "\033[41m"
+
+class ColoredFormatter(logging.Formatter):
+    def format(self, record):
+        original_msg = record.msg
+        
+        color = Colors.RESET
+        prefix = ""
+
+        if record.levelno >= logging.CRITICAL:
+            color = Colors.BG_RED + Colors.BOLD + "\033[97m" # White text on Red BG
+        elif record.levelno >= logging.ERROR:
+            color = Colors.RED
+        elif record.levelno >= logging.WARNING:
+            color = Colors.YELLOW
+        
+        msg_str = str(record.msg)
+        
+        if "[Redirector]" in msg_str:
+            color = Colors.CYAN
+        elif "[VRC CRASH]" in msg_str:
+            color = Colors.BG_RED + Colors.BOLD + "\033[97m"
+        elif "[VRC ERROR]" in msg_str:
+            color = Colors.RED
+        elif "[VRC AVPRO]" in msg_str:
+            color = Colors.YELLOW
+        elif "ENABLED" in msg_str or "Success" in msg_str or "Patch enabled" in msg_str:
+            color = Colors.GREEN
+        elif "DISABLED" in msg_str:
+            color = Colors.GREY
+        
+        timestamp = self.formatTime(record, self.datefmt)
+        
+        if record.exc_info:
+            return f"{color}{timestamp} - {record.levelname} - {super().format(record)}{Colors.RESET}"
+        
+        return f"{Colors.GREY}{timestamp}{Colors.RESET} - {color}{record.getMessage()}{Colors.RESET}"
 
 def get_application_path():
     if getattr(sys, 'frozen', False):
@@ -51,22 +104,23 @@ def get_application_path():
 
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
+WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
+SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
 
 def setup_logging():
     logger = logging.getLogger('Patcher')
     logger.setLevel(logging.DEBUG) 
 
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.DEBUG) 
-    ch.setFormatter(formatter)
+    ch.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(ch)
 
     try:
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
         fh.setLevel(logging.DEBUG) 
-        fh.setFormatter(formatter)
+        fh.setFormatter(file_formatter)
         logger.addHandler(fh)
     except Exception:
         logger.error(f"Failed to set up file logging at {LOG_FILE_PATH}", exc_info=True)
@@ -123,8 +177,14 @@ def get_vrchat_log_dir(base_path):
             return path
     return prompt_for_log_dir(config_path)
 
+VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
+VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
+TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
+ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
+REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
+
 def check_for_updates():
-    if "BUILT-FROM-SOURCE" in CURRENT_VERSION:
+    if "dev" in CURRENT_VERSION:
         logger.info(f"Running Dev Build ({CURRENT_VERSION}). Skipping update check.")
         return
 
@@ -146,17 +206,13 @@ def check_for_updates():
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
 
-VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
-VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
-SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
-SOURCE_WRAPPER_FILE = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
-TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
-ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
-REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
-WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
+def safe_get_size(filepath):
+    try:
+        return os.path.getsize(filepath)
+    except FileNotFoundError: return 0
 
 def tail_log_file(log_path, stop_event):
-    logger.info(f"Starting to monitor redirector log: {log_path}")
+    logger.info(f"Starting to monitor wrapper log: {log_path}")
     last_pos = 0
     try:
         if os.path.exists(log_path): last_pos = os.path.getsize(log_path)
@@ -171,20 +227,20 @@ def tail_log_file(log_path, stop_event):
                     new_lines = f.readlines()
                     if new_lines:
                         for line in new_lines:
-                            print(f"[Redirector] {line.strip()}")
+                            logger.info(f"[Redirector] {line.strip()}")
                         last_pos = f.tell()
         except Exception: pass
         time.sleep(0.5)
 
-def safe_get_size(filepath):
+def find_latest_log_file():
     try:
-        return os.path.getsize(filepath)
-    except FileNotFoundError: return 0
+        list_of_files = glob.glob(os.path.join(VRCHAT_LOG_DIR, 'output_log_*.txt'))
+        return max(list_of_files, key=os.path.getmtime) if list_of_files else None
+    except Exception: return None
 
 def get_patch_state():
     target_size = safe_get_size(TARGET_YTDLP_PATH)
     backup_exists = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH)
-    
     
     is_target_our_wrapper = (target_size > 0 and target_size < VRC_YTDLP_MIN_SIZE_BYTES)
     is_target_vrchat_file = (target_size >= VRC_YTDLP_MIN_SIZE_BYTES)
@@ -197,6 +253,22 @@ def get_patch_state():
         if backup_exists: return PatchState.BROKEN
         else: return PatchState.DISABLED
     return PatchState.BROKEN
+
+def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
+    if not wrapper_file_list: return
+    logger.debug(f"Cleaning wrapper files (Clean Renamed: {clean_renamed_exe})...")
+    for filename in wrapper_file_list:
+        file_path = os.path.join(VRCHAT_TOOLS_DIR, filename)
+        if filename.lower() == WRAPPER_EXE_NAME.lower() and clean_renamed_exe:
+            renamed_path = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
+            if os.path.exists(renamed_path):
+                try: os.remove(renamed_path)
+                except Exception: pass
+        if os.path.exists(file_path):
+            try:
+                if os.path.isfile(file_path): os.remove(file_path)
+                elif os.path.isdir(file_path): shutil.rmtree(file_path)
+            except Exception: pass
 
 def enable_patch(wrapper_file_list, is_waiting_flag):
     try:
@@ -240,22 +312,6 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         logger.exception("An unexpected error occurred enabling patch.")
         return False, is_waiting_flag
 
-def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
-    if not wrapper_file_list: return
-    logger.debug(f"Cleaning wrapper files (Clean Renamed: {clean_renamed_exe})...")
-    for filename in wrapper_file_list:
-        file_path = os.path.join(VRCHAT_TOOLS_DIR, filename)
-        if filename.lower() == WRAPPER_EXE_NAME.lower() and clean_renamed_exe:
-            renamed_path = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
-            if os.path.exists(renamed_path):
-                try: os.remove(renamed_path)
-                except Exception: pass
-        if os.path.exists(file_path):
-            try:
-                if os.path.isfile(file_path): os.remove(file_path)
-                elif os.path.isdir(file_path): shutil.rmtree(file_path)
-            except Exception: pass
-
 def disable_patch(wrapper_file_list):
     logger.info("Disabling patch...")
     try:
@@ -288,41 +344,73 @@ def repair_patch(wrapper_file_list):
     except Exception:
         return PatchState.BROKEN
 
-def find_latest_log_file():
-    try:
-        list_of_files = glob.glob(os.path.join(VRCHAT_LOG_DIR, 'output_log_*.txt'))
-        return max(list_of_files, key=os.path.getmtime) if list_of_files else None
-    except Exception: return None
+instance_info_cache = {}
 
 def parse_instance_type_from_line(line):
     if 'Requesting Post instances' in line:
-        type_match = re.search(r'"type"\s*:\s*"([^"]+)"', line, re.IGNORECASE)
-        if type_match:
-            found_type = type_match.group(1).lower()
-            if found_type == 'group':
-                group_access_match = re.search(r'"groupAccessType"\s*:\s*"([^"]+)"', line, re.IGNORECASE)
-                if group_access_match:
-                    access_type = group_access_match.group(1).lower()
-                    if access_type == 'public': return 'group_public'
-                    return 'group'
-            return found_type
+        try:
+            json_match = re.search(r'(\{.*\})', line)
+            if json_match:
+                raw_json = json_match.group(1)
+                data = json.loads(raw_json)
+                
+                world_id = data.get('worldId', '')
+                instance_type = data.get('type', '').lower()
+                group_access = data.get('groupAccessType', '').lower()
+                
+                final_type = instance_type
+                if instance_type == 'group':
+                    if group_access == 'public': final_type = 'group_public'
+                    else: final_type = 'group' # members/plus
+                
+                if world_id:
+                    instance_info_cache[world_id] = final_type
+                    logger.debug(f"Cached info for {world_id}: {final_type}")
+                    
+        except Exception: pass
+        return None 
 
     if '[Behaviour] Destination set:' in line or '[Behaviour] Joining' in line:
+        wrld_match = re.search(r'(wrld_[a-f0-9\-]+)', line)
+        if wrld_match:
+            world_id = wrld_match.group(1)
+            if world_id in instance_info_cache:
+                cached_type = instance_info_cache[world_id]
+                return cached_type
+
         if 'wrld_' in line and '~' in line:
             match = re.search(r'~([a-z0-9_]+)\(', line)
             if match:
                 instance_mod = match.group(1).lower()
-                if instance_mod in ['region', 'nonce']: 
-                    return None 
-                
-                if instance_mod == 'group':
-                    return None
-
+                if instance_mod in ['region', 'nonce']: return None 
+                if instance_mod == 'group': return 'group_unknown'
                 if instance_mod == 'hidden': return 'friends+'
                 if instance_mod == 'private': return 'invite'
                 return instance_mod
-
     return None
+
+def check_for_game_errors(line):
+    line = line.strip()
+    
+    if "Error      -  " in line:
+        if "Object reference not set" in line:
+             logger.error(f"[VRC CRASH] {line}")
+             return
+        if "[Video Playback]" in line or "Websocket" in line:
+            logger.warning(f"[VRC ERROR] {line}")
+            return
+
+    if "[Video Playback] ERROR" in line:
+        logger.error(f"[VRC VIDEO] {line}")
+        return
+
+    if "[AVProVideo] Error" in line or "[AVProVideo] Warning" in line:
+        logger.warning(f"[VRC AVPRO] {line}")
+        return
+
+    if "System.NullReferenceException" in line:
+        logger.critical(f"[VRC EXCEPTION] {line}")
+        return
 
 def main():
     logger.info(f"Patcher {CURRENT_VERSION} starting up...")
@@ -344,35 +432,54 @@ def main():
     last_pos = 0
     last_instance_type = None
     is_waiting_for_vrchat_file = False
+    wait_log_counter = 0
     
     logger.info("Scanning for existing VRChat session...")
+    
     latest_log = find_latest_log_file()
     if latest_log:
         current_log_file = latest_log
+        logger.info(f"Monitoring VRChat Log: {os.path.basename(current_log_file)}")
         try:
             file_size = os.path.getsize(latest_log)
+            start_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
+            
+            logger.info(f"Scanning last {round((file_size - start_pos)/1024/1024, 2)} MB of logs for state...")
+
             with open(latest_log, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(max(0, file_size - 32768))
+                f.seek(start_pos)
                 lines = f.readlines()
+                
                 for line in reversed(lines):
                     instance_type = parse_instance_type_from_line(line)
                     if instance_type:
                         last_instance_type = instance_type
-                        logger.info(f"Found active instance in logs: {last_instance_type}")
+                        logger.info(f"Startup State Found: World Type = {last_instance_type}")
                         break
-                last_pos = file_size
-        except Exception: pass
+                
+                last_pos = f.tell()
+                
+        except Exception as e:
+            logger.error(f"Error during startup scan: {e}")
 
     if not last_instance_type:
-        logger.info("No active instance found. Defaulting to ENABLED.")
+        logger.info("No active instance found in recent logs. Defaulting to ENABLED (Private).")
         last_instance_type = "private"
         
     try:
         while True:
-            should_disable = last_instance_type in ['public', 'group_public']
+            should_disable = last_instance_type in ['public', 'group_public', 'group_unknown']
             desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
             current_state = get_patch_state()
             
+            if is_waiting_for_vrchat_file:
+                wait_log_counter += 1
+                if wait_log_counter >= 5:
+                    logger.info("Still waiting for VRChat to regenerate yt-dlp.exe...")
+                    wait_log_counter = 0
+            else:
+                wait_log_counter = 0
+
             if current_state == PatchState.BROKEN:
                 logger.warning("State is BROKEN. Attempting repair.")
                 current_state = repair_patch(WRAPPER_FILE_LIST)
@@ -381,12 +488,7 @@ def main():
             elif desired_state == PatchState.ENABLED and current_state == PatchState.DISABLED:
                 if not is_waiting_for_vrchat_file:
                     logger.info(f"Switching to ENABLED (Instance: {last_instance_type})")
-                
                 patch_success, next_is_waiting = enable_patch(WRAPPER_FILE_LIST, is_waiting_for_vrchat_file)
-                
-                if next_is_waiting and not is_waiting_for_vrchat_file:
-                    logger.info("yt-dlp.exe not found. Waiting for VRChat to regenerate it...")
-                
                 is_waiting_for_vrchat_file = next_is_waiting
                 if patch_success: current_state = PatchState.ENABLED
             
@@ -404,8 +506,12 @@ def main():
                 time.sleep(POLL_INTERVAL); continue
 
             if latest_log != current_log_file:
+                logger.info("-" * 30)
                 logger.info(f"New log file detected: {os.path.basename(latest_log)}")
-                current_log_file, last_pos = latest_log, 0
+                logger.info("-" * 30)
+                current_log_file = latest_log
+                last_pos = 0
+                instance_info_cache.clear()
             
             try:
                 if os.path.exists(current_log_file):
@@ -424,6 +530,9 @@ def main():
                                         logger.info(f"Detected instance change: {last_instance_type} -> {instance_type}")
                                         last_instance_type = instance_type
                                         is_waiting_for_vrchat_file = False
+                                    
+                                    check_for_game_errors(line)
+
             except Exception:
                 time.sleep(POLL_INTERVAL)
             

@@ -14,10 +14,10 @@ if platform.system() != 'Windows':
 
 REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
 
-LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe" # Bundled via PyInstaller
+LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe"
 DENO_FILENAME = "deno.exe"
 
-ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"   # VRChat's file
+ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
 
 LOG_FILE_NAME = 'wrapper_debug.log'
 
@@ -141,7 +141,7 @@ def process_and_execute(incoming_args):
         new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
         
         logger.info(f"Rewriting URL to: {new_url}")
-        print(new_url, flush=True) # Send to VRChat
+        print(new_url, flush=True)
         logger.info(f"Successfully sent final URL to VRChat: {new_url}")
         return 0 
 

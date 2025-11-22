@@ -17,12 +17,12 @@ import signal
 import ctypes
 
 if platform.system() == 'Windows':
-    os.system('color')  # Enables ANSI escape sequences in Windows CMD
+    os.system('color')
 
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v11.21.25-dev"
+    CURRENT_VERSION = "v11.22.25-dev"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -33,17 +33,17 @@ if platform.system() != 'Windows':
 
 class PatchState(Enum):
     UNKNOWN = auto()
-    ENABLED = auto()    # Our wrapper is yt-dlp.exe
-    DISABLED = auto()   # VRC's file is yt-dlp.exe
-    BROKEN = auto()     # Files missing/mismatched
+    ENABLED = auto()
+    DISABLED = auto()
+    BROKEN = auto()
 
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 3.0 
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
 WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
 
-VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024 # 10MB
+VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024
 STARTUP_SCAN_DEPTH = 10 * 1024 * 1024
 
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
@@ -59,7 +59,7 @@ def install_exit_handler():
         HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
         
         def console_handler(ctrl_type):
-            if ctrl_type in (0, 2): # CTRL_C_EVENT or CTRL_CLOSE_EVENT
+            if ctrl_type in (0, 2):
                 print(f"\n[System] Console close detected (Type: {ctrl_type}). Cleaning up...")
                 cleanup_on_exit()
                 return True
@@ -120,10 +120,12 @@ SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR
 def setup_logging():
     logger = logging.getLogger('Patcher')
     logger.setLevel(logging.DEBUG)
+
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(logging.DEBUG) 
     ch.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(ch)
+
     try:
         file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
@@ -229,15 +231,17 @@ def tail_log_file(log_path, stop_event):
             if os.path.exists(log_path):
                 current_size = os.path.getsize(log_path)
                 if last_pos > current_size: last_pos = 0
-                with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
-                    f.seek(last_pos)
-                    new_lines = f.readlines()
-                    if new_lines:
-                        for line in new_lines:
-                            logger.info(f"[Redirector] {line.strip()}")
-                        last_pos = f.tell()
+                
+                if current_size > last_pos:
+                    with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                        f.seek(last_pos)
+                        new_lines = f.readlines()
+                        if new_lines:
+                            for line in new_lines:
+                                logger.info(f"[Redirector] {line.strip()}")
+                            last_pos = f.tell()
         except Exception: pass
-        time.sleep(0.5)
+        time.sleep(1.0)
 
 def find_latest_log_file():
     try:
@@ -245,13 +249,13 @@ def find_latest_log_file():
         return max(list_of_files, key=os.path.getmtime) if list_of_files else None
     except Exception: return None
 
-def retry_operation(func, retries=3, delay=1.0):
+def retry_operation(func, retries=5, delay=0.5):
     for i in range(retries):
         try:
             return func()
-        except PermissionError:
+        except (PermissionError, OSError) as e:
             if i < retries - 1:
-                logger.warning(f"File locked. Retrying in {delay}s... ({i+1}/{retries})")
+                logger.debug(f"File locked ({e}). Retrying in {delay}s... ({i+1}/{retries})")
                 time.sleep(delay)
             else:
                 raise
@@ -261,6 +265,7 @@ def retry_operation(func, retries=3, delay=1.0):
 def get_patch_state():
     target_size = safe_get_size(TARGET_YTDLP_PATH)
     backup_exists = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH)
+    
     is_target_our_wrapper = (target_size > 0 and target_size < VRC_YTDLP_MIN_SIZE_BYTES)
     is_target_vrchat_file = (target_size >= VRC_YTDLP_MIN_SIZE_BYTES)
 
@@ -275,18 +280,22 @@ def get_patch_state():
 
 def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
     if not wrapper_file_list: return
-    logger.debug(f"Cleaning wrapper files (Clean Renamed: {clean_renamed_exe})...")
+    logger.debug(f"Cleaning wrapper files (Clean Target: {clean_renamed_exe})...")
     for filename in wrapper_file_list:
         file_path = os.path.join(VRCHAT_TOOLS_DIR, filename)
+        
         if filename.lower() == WRAPPER_EXE_NAME.lower() and clean_renamed_exe:
             renamed_path = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
             if os.path.exists(renamed_path):
                 try:
                     if safe_get_size(renamed_path) < VRC_YTDLP_MIN_SIZE_BYTES:
                         retry_operation(lambda: os.remove(renamed_path))
-                        logger.debug(f"Cleaned up wrapper executable: {renamed_path}")
+                        logger.info(f"Cleanup: Removed wrapper executable: {renamed_path}")
+                    else:
+                        logger.info(f"Cleanup: Skipping target {renamed_path} (Size > 10MB, likely Original)")
                 except Exception as e:
                     logger.warning(f"Failed to remove {renamed_path}: {e}")
+
         if os.path.exists(file_path):
             try:
                 if os.path.isfile(file_path):
@@ -300,30 +309,49 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
     try:
         if not os.path.exists(VRCHAT_TOOLS_DIR):
             os.makedirs(VRCHAT_TOOLS_DIR)
-            logger.info(f"Created Tools directory at: {VRCHAT_TOOLS_DIR}")
 
         target_size = safe_get_size(TARGET_YTDLP_PATH)
         is_target_vrchat_file = (target_size >= VRC_YTDLP_MIN_SIZE_BYTES)
         is_target_old_wrapper = (target_size > 0 and target_size < VRC_YTDLP_MIN_SIZE_BYTES)
 
         if is_target_vrchat_file:
-            logger.info(f"Enabling patch. Target is VRChat file ({target_size} bytes).")
-            logger.info(f"Backing up current VRChat file to '{ORIGINAL_EXE_NAME}'")
-            retry_operation(lambda: os.replace(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
+            logger.info(f"Enabling patch. Found original VRChat file ({target_size} bytes).")
+            
+            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+                logger.info(f"Creating secure backup copy at '{ORIGINAL_EXE_NAME}'...")
+                retry_operation(lambda: shutil.copy2(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
+            
+            backup_size = safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH)
+            logger.info(f"Backup Verification: Size={backup_size} bytes.")
+
+            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) or backup_size < VRC_YTDLP_MIN_SIZE_BYTES:
+                logger.error("Backup failed or corrupted! Aborting enable to protect original file.")
+                return False, is_waiting_flag
+                
+            logger.info("Backup confirmed. Removing original executable to replace with wrapper...")
+            retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
+
         elif is_target_old_wrapper:
             logger.info("Updating existing wrapper...")
             if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                 logger.error("Backup missing! Cannot update safely.")
+                 logger.error("Backup missing! Cannot safely update. Please verify game integrity.")
                  return False, is_waiting_flag
+
         elif target_size == 0:
-            return False, True
+            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+                logger.info("Target missing and no backup found. Waiting for generation.")
+                return False, True
 
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
-        logger.debug(f"Copying wrapper files from {SOURCE_WRAPPER_DIR}")
+        
         retry_operation(lambda: shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True))
         
         copied_wrapper_path = os.path.join(VRCHAT_TOOLS_DIR, WRAPPER_EXE_NAME)
         if os.path.exists(copied_wrapper_path):
+            if os.path.exists(TARGET_YTDLP_PATH):
+                if safe_get_size(TARGET_YTDLP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                    retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
+            
             retry_operation(lambda: os.replace(copied_wrapper_path, TARGET_YTDLP_PATH))
             logger.info("Patch enabled successfully.")
             return True, False
@@ -332,7 +360,7 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
             return False, is_waiting_flag
 
     except PermissionError:
-        logger.error("Permission denied. Is VRChat running? Failed to enable patch.")
+        logger.warning("Permission denied. VRChat is likely loading/using the file. Retrying next cycle.")
         return False, is_waiting_flag
     except Exception:
         logger.exception("An unexpected error occurred enabling patch.")
@@ -341,32 +369,37 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
 def disable_patch(wrapper_file_list):
     logger.info("Disabling patch...")
     try:
-        _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True)
+        _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
         if os.path.exists(REDIRECTOR_LOG_PATH):
             try:
                 retry_operation(lambda: os.remove(REDIRECTOR_LOG_PATH))
-                logger.debug(f"Deleted wrapper log: {REDIRECTOR_LOG_PATH}")
-            except Exception as e:
-                logger.debug(f"Failed to delete wrapper log: {e}")
+            except Exception: pass
 
         if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_size = safe_get_size(TARGET_YTDLP_PATH)
+                
                 if current_size < VRC_YTDLP_MIN_SIZE_BYTES:
+                    logger.info(f"Removing wrapper executable (Size: {current_size} bytes)...")
                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
-                    logger.debug("Cleaned up wrapper executable before restore.")
+                else:
+                    logger.info(f"Target is already a large file ({current_size} bytes). Overwriting with backup to be safe.")
             
-            retry_operation(lambda: os.replace(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH))
+            logger.info("Restoring original file from backup...")
+            retry_operation(lambda: shutil.copy2(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH))
             logger.info("Patch disabled successfully (Original file restored).")
         else:
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_size = safe_get_size(TARGET_YTDLP_PATH)
                 if current_size < VRC_YTDLP_MIN_SIZE_BYTES:
-                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
-                     logger.info("Wrapper removed. VRChat will regenerate yt-dlp on next startup.")
+                    logger.warning(f"No backup found and target is wrapper ({current_size} bytes). Deleting to force regeneration.")
+                    retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
+                else:
+                    logger.info(f"Patch disabled (No backup, but target seems to be original file: {current_size} bytes).")
             else:
-                logger.warning("No backup found and no active file. VRChat will regenerate.")
+                logger.info("Patch disabled (No files found).")
+
         return True
     except Exception:
         logger.exception("Error disabling patch.")
@@ -376,8 +409,6 @@ def repair_patch(wrapper_file_list):
     logger.warning("Repairing patch state...")
     try:
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True)
-        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-            retry_operation(lambda: os.remove(ORIGINAL_YTDLP_BACKUP_PATH))
         return PatchState.DISABLED
     except Exception:
         return PatchState.BROKEN
@@ -405,7 +436,6 @@ def parse_instance_type_from_line(line):
             return 'public'
         else:
             return 'public'
-
     return None
 
 def cleanup_on_exit():
@@ -444,7 +474,7 @@ def main():
     last_pos = 0
     last_instance_type = None
     is_waiting_for_vrchat_file = False
-    wait_log_counter = 0
+    has_logged_waiting = False
     
     logger.info("Scanning for existing VRChat session...")
     
@@ -499,12 +529,16 @@ def main():
             current_state = get_patch_state()
             
             if is_waiting_for_vrchat_file:
-                wait_log_counter += 1
-                if wait_log_counter >= 5:
-                    logger.info("Still waiting for VRChat to regenerate yt-dlp.exe...")
-                    wait_log_counter = 0
+                if safe_get_size(TARGET_YTDLP_PATH) > 0:
+                    logger.info("VRChat has regenerated yt-dlp.exe. Resuming patch operations...")
+                    is_waiting_for_vrchat_file = False
+                    has_logged_waiting = False
+                else:
+                    if not has_logged_waiting:
+                        logger.info("Waiting for VRChat to regenerate yt-dlp.exe... (Rejoin world or restart game to force generation)")
+                        has_logged_waiting = True
             else:
-                wait_log_counter = 0
+                has_logged_waiting = False
 
             if current_state == PatchState.BROKEN:
                 logger.warning("State is BROKEN. Attempting repair.")
@@ -556,7 +590,7 @@ def main():
                                         last_instance_type = instance_type
                                         is_waiting_for_vrchat_file = False 
             except Exception:
-                time.sleep(POLL_INTERVAL)
+                pass
             
             time.sleep(POLL_INTERVAL)
     

@@ -93,8 +93,6 @@ class ColoredFormatter(logging.Formatter):
         msg_str = str(record.msg)
         if "[Redirector]" in msg_str:
             color = Colors.CYAN
-        elif "[VRC CRASH]" in msg_str:
-            color = Colors.BG_RED + Colors.BOLD + "\033[97m"
         elif "Switching to ENABLED" in msg_str or "Patch enabled" in msg_str:
             color = Colors.GREEN
         elif "Switching to DISABLED" in msg_str or "Patch disabled" in msg_str:
@@ -402,19 +400,13 @@ def parse_instance_type_from_line(line):
             if '~group' in world_str:
                 if 'groupAccessType(public)' in world_str: return 'group_public'
                 if 'groupAccessType(plus)' in world_str: return 'group_plus'
-                return 'group' # Default Group (Members/Safe)
+                return 'group'
             
             return 'public'
         else:
             return 'public'
 
     return None
-
-def check_for_game_errors(line):
-    line = line.strip()
-    if "System.NullReferenceException" in line:
-        logger.critical(f"[VRC CRASH] {line}")
-        return
 
 def cleanup_on_exit():
     logger.info("Performing exit cleanup...")
@@ -495,7 +487,7 @@ def main():
 
         except Exception as e:
             logger.error(f"Error during startup scan: {e}")
-            last_instance_type = "private" # Safe default
+            last_instance_type = "private"
 
     if not last_instance_type:
         last_instance_type = "private"
@@ -503,7 +495,6 @@ def main():
     try:
         while True:
             should_disable = last_instance_type in ['public', 'group_public']
-            
             desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
             current_state = get_patch_state()
             
@@ -564,8 +555,6 @@ def main():
                                         logger.info(f"Detected instance change: {last_instance_type} -> {instance_type}")
                                         last_instance_type = instance_type
                                         is_waiting_for_vrchat_file = False 
-                                    
-                                    check_for_game_errors(line)
             except Exception:
                 time.sleep(POLL_INTERVAL)
             

@@ -44,7 +44,7 @@ CONFIG_FILE_NAME = 'patcher_config.json'
 WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
 
 VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024
-STARTUP_SCAN_DEPTH = 10 * 1024 * 1024
+STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
 
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
 ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'

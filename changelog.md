@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.28.10] - 2025-12-28
+### Fixed
+- **Build Stabilization**: Minor fixes to the patcher logic and build process verification.
+
 ## [v2025.12.28.9] - 2025-12-28
 ### Changed
 - **Full SHA-256 Transition**: Removed all remaining file-size heuristics and transitioned entirely to SHA-256 hash verification for identifying original VRChat files, wrappers, and validating backups.

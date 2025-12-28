@@ -16,7 +16,7 @@ if platform.system() != 'Windows':
     print("FATAL: This wrapper is designed to run on Windows only.", file=sys.stderr)
     sys.exit(1)
 
-REMOTE_SERVER_BASE = "https://proxy.whyknot.dev"
+REMOTE_SERVER_BASE = "https://whyknot.dev"
 
 LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe"
 DENO_FILENAME = "deno.exe"

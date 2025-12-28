@@ -709,8 +709,11 @@ def main():
                                 last_pos = f.tell()
                                 for line in new_lines:
                                     if any(x in line for x in ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error"]):
-                                        logger.warning(f"Detected Video Error: {line.strip()}")
-                                        update_wrapper_state(is_broken=True)
+                                        if "whyknot.dev" in line:
+                                            logger.warning(f"Detected Proxy Video Error: {line.strip()}")
+                                            update_wrapper_state(is_broken=True)
+                                        else:
+                                            logger.info(f"Detected Non-Proxy Video Error (Ignoring fallback): {line.strip()}")
 
                                     instance_type = parse_instance_type_from_line(line)
                                     if instance_type and instance_type != last_instance_type:

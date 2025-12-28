@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2025.12.28.8] - 2025-12-28
+### Improved
+- **Smart Error Attribution**: The patcher now verifies if a video error in the VRChat logs is actually related to the proxy (`whyknot.dev`) before triggering a fallback. This prevents unrelated video failures from disabling the proxy.
+
+## [v2025.12.28.7] - 2025-12-28
+### Changed
+- **URL Format**: Updated the proxy URL base from `https://proxy.whyknot.dev` to `https://whyknot.dev`.
+
 ## [v2025.12.28.6] - 2025-12-28
 ### Added
 - **SHA-256 Verification**: Replaced unreliable file-size checks with SHA-256 hash verification. The patcher now precisely identifies its own wrapper and ensures that VRChat's original files are never misidentified or accidentally overwritten.

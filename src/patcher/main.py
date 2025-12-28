@@ -245,15 +245,35 @@ def safe_get_size(filepath):
 def is_game_running():
     try:
         import subprocess
-        cmd = 'wmic process where "name=\'VRChat.exe\'" get ProcessId,CreationDate /format:csv'
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
-        for line in output.splitlines():
-            if line.strip() and not line.startswith('Node'):
-                parts = line.split(',')
-                if len(parts) >= 3:
-                    return parts[2].strip(), parts[1].strip()
+        # Use tasklist for primary detection as it's the most reliable on Windows
+        output = subprocess.check_output('tasklist /FI "IMAGENAME eq VRChat.exe" /NH', shell=True, stderr=subprocess.DEVNULL).decode()
+        
+        if "VRChat.exe" in output or "vrchat.exe" in output:
+            # Extract PID - tasklist /NH output format: VRChat.exe  12345  Console ...
+            parts = output.split()
+            pid = None
+            for i, part in enumerate(parts):
+                if part.lower() == "vrchat.exe" and i + 1 < len(parts):
+                    pid = parts[i+1]
+                    break
+            
+            if pid:
+                # Try to get CreationDate for session locking, but don't fail if wmic is unavailable
+                try:
+                    # format:list is easier to parse than CSV
+                    cmd = f'wmic process where ProcessId={pid} get CreationDate /format:list'
+                    wmic_out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+                    for line in wmic_out.splitlines():
+                        if 'CreationDate=' in line:
+                            return pid, line.split('=')[1].strip()
+                except Exception:
+                    pass
+                
+                return pid, "active-session"
+        
         return None, None
-    except Exception:
+    except Exception as e:
+        # Fallback to very basic check if even tasklist fails
         return None, None
 
 def check_wrapper_health(wrapper_file_list):

@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.28.4] - 2025-12-28
+### Fixed
+- **Game Detection**: Switched to `tasklist` as the primary process detection method to improve reliability across different Windows installations where `wmic` might be deprecated or slow.
+
 ## [v2025.12.28.3] - 2025-12-28
 ### Added
 - **PID-Locked Monitoring**: Patcher now uniquely identifies VRChat sessions via PID/creation time, preventing log ghosting across restarts.

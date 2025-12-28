@@ -23,7 +23,7 @@ if platform.system() == 'Windows':
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v11.22.25-dev"
+    CURRENT_VERSION = "v2025.12.28.9"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -44,7 +44,7 @@ REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
 WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
 
-VRC_YTDLP_MIN_SIZE_BYTES = 10 * 1024 * 1024
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
 
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
@@ -250,11 +250,6 @@ def check_for_updates():
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
 
-def safe_get_size(filepath):
-    try:
-        return os.path.getsize(filepath)
-    except FileNotFoundError: return 0
-
 def is_game_running():
     try:
         import subprocess
@@ -355,17 +350,17 @@ def get_patch_state():
     source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
     wrapper_hash = calculate_sha256(source_wrapper_path)
     
-    backup_exists = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES
+    backup_hash = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
+    backup_exists = backup_hash is not None and backup_hash != wrapper_hash and backup_hash != EMPTY_SHA256
     
     if target_hash and wrapper_hash and target_hash == wrapper_hash:
         if backup_exists: return PatchState.ENABLED
         else: return PatchState.BROKEN
     
-    target_size = safe_get_size(TARGET_YTDLP_PATH)
-    if target_size >= VRC_YTDLP_MIN_SIZE_BYTES:
+    if target_hash and target_hash != wrapper_hash and target_hash != EMPTY_SHA256:
         return PatchState.DISABLED
         
-    if target_size == 0:
+    if not target_hash or target_hash == EMPTY_SHA256:
         if backup_exists: return PatchState.BROKEN
         else: return PatchState.DISABLED
         
@@ -387,7 +382,7 @@ def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
             if os.path.exists(renamed_path):
                 try:
                     current_hash = calculate_sha256(renamed_path)
-                    if current_hash == wrapper_hash or safe_get_size(renamed_path) < VRC_YTDLP_MIN_SIZE_BYTES:
+                    if current_hash == wrapper_hash or current_hash == EMPTY_SHA256:
                         retry_operation(lambda: os.remove(renamed_path))
                         logger.info(f"Cleanup: Removed wrapper executable: {renamed_path}")
                     else:
@@ -412,13 +407,12 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
         wrapper_hash = calculate_sha256(source_wrapper_path)
         target_hash = calculate_sha256(TARGET_YTDLP_PATH)
-        target_size = safe_get_size(TARGET_YTDLP_PATH)
 
-        is_target_vrchat_file = (target_size >= VRC_YTDLP_MIN_SIZE_BYTES and target_hash != wrapper_hash)
-        is_target_old_wrapper = (target_hash == wrapper_hash or (target_size > 0 and target_size < VRC_YTDLP_MIN_SIZE_BYTES))
+        is_target_vrchat_file = (target_hash and target_hash != wrapper_hash and target_hash != EMPTY_SHA256)
+        is_target_old_wrapper = (target_hash == wrapper_hash)
 
         if is_target_vrchat_file:
-            logger.info(f"Enabling patch. Found original VRChat file ({target_size} bytes).")
+            logger.info(f"Enabling patch. Found original VRChat file (SHA256: {target_hash[:12]}...).")
             
             # Secure Backup Logic - Verify we aren't backing up a wrapper
             if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) or calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH) == wrapper_hash:
@@ -429,16 +423,16 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
                  logger.info(f"Creating secondary secure backup at '{SECURE_BACKUP_NAME}'...")
                  retry_operation(lambda: shutil.copy2(TARGET_YTDLP_PATH, SECURE_BACKUP_PATH))
             
-            backup_size = safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH)
-            secure_backup_size = safe_get_size(SECURE_BACKUP_PATH)
-            logger.info(f"Backup Verification: Primary={backup_size} bytes, Secure={secure_backup_size} bytes.")
+            backup_hash = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
+            secure_backup_hash = calculate_sha256(SECURE_BACKUP_PATH)
+            logger.info(f"Backup Verification: Primary={backup_hash[:12]}..., Secure={secure_backup_hash[:12]}...")
 
-            if backup_size < VRC_YTDLP_MIN_SIZE_BYTES and secure_backup_size < VRC_YTDLP_MIN_SIZE_BYTES:
+            if (not backup_hash or backup_hash == EMPTY_SHA256) and (not secure_backup_hash or secure_backup_hash == EMPTY_SHA256):
                 logger.error("Both backups failed or are corrupted! Aborting enable to protect original file.")
                 return False, is_waiting_flag
             
             # Ensure we have at least one valid backup
-            if calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH) == wrapper_hash and secure_backup_size >= VRC_YTDLP_MIN_SIZE_BYTES:
+            if calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH) == wrapper_hash and secure_backup_hash and secure_backup_hash != wrapper_hash and secure_backup_hash != EMPTY_SHA256:
                  logger.warning("Primary backup is a wrapper, restoring from secure backup...")
                  retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
 
@@ -448,8 +442,10 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         elif is_target_old_wrapper:
             logger.info("Updating existing wrapper...")
             
-            backup_valid = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH) != wrapper_hash and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES
-            secure_valid = os.path.exists(SECURE_BACKUP_PATH) and calculate_sha256(SECURE_BACKUP_PATH) != wrapper_hash and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES
+            bh = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
+            sh = calculate_sha256(SECURE_BACKUP_PATH)
+            backup_valid = bh and bh != wrapper_hash and bh != EMPTY_SHA256
+            secure_valid = sh and sh != wrapper_hash and sh != EMPTY_SHA256
 
             if not backup_valid and not secure_valid:
                  logger.error("All backups missing or invalid! Cannot safely update. Please verify game integrity.")
@@ -462,9 +458,11 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
                 logger.info("Restoring missing primary backup from secure...")
                 retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
 
-        elif target_size == 0:
-            if not (os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES):
-                 if os.path.exists(SECURE_BACKUP_PATH) and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+        elif not target_hash or target_hash == EMPTY_SHA256:
+            bh = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
+            sh = calculate_sha256(SECURE_BACKUP_PATH)
+            if not (bh and bh != wrapper_hash and bh != EMPTY_SHA256):
+                 if sh and sh != wrapper_hash and sh != EMPTY_SHA256:
                      logger.info("Primary backup missing, but secure backup found. Restoring primary...")
                      retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
                  else:
@@ -479,7 +477,7 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         if os.path.exists(copied_wrapper_path):
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_target_hash = calculate_sha256(TARGET_YTDLP_PATH)
-                if current_target_hash == wrapper_hash or safe_get_size(TARGET_YTDLP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                if current_target_hash == wrapper_hash or current_target_hash == EMPTY_SHA256:
                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
             
             retry_operation(lambda: os.replace(copied_wrapper_path, TARGET_YTDLP_PATH))
@@ -510,16 +508,18 @@ def disable_patch(wrapper_file_list):
             except Exception: pass
 
         restore_source = None
-        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH) != wrapper_hash and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+        bh = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
+        sh = calculate_sha256(SECURE_BACKUP_PATH)
+        if bh and bh != wrapper_hash and bh != EMPTY_SHA256:
             restore_source = ORIGINAL_YTDLP_BACKUP_PATH
-        elif os.path.exists(SECURE_BACKUP_PATH) and calculate_sha256(SECURE_BACKUP_PATH) != wrapper_hash and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+        elif sh and sh != wrapper_hash and sh != EMPTY_SHA256:
             restore_source = SECURE_BACKUP_PATH
             logger.warning("Primary backup missing or invalid. Using secure backup.")
 
         if restore_source:
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_hash = calculate_sha256(TARGET_YTDLP_PATH)
-                if current_hash == wrapper_hash or safe_get_size(TARGET_YTDLP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                if current_hash == wrapper_hash or current_hash == EMPTY_SHA256:
                     logger.info(f"Removing wrapper executable...")
                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
                 else:
@@ -531,7 +531,7 @@ def disable_patch(wrapper_file_list):
         else:
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_hash = calculate_sha256(TARGET_YTDLP_PATH)
-                if current_hash == wrapper_hash or safe_get_size(TARGET_YTDLP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                if current_hash == wrapper_hash or current_hash == EMPTY_SHA256:
                     logger.warning(f"No backup found and target is wrapper. Deleting to force regeneration.")
                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
                 else:

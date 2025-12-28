@@ -1,5 +1,10 @@
 # Changelog
 
+## [v2025.12.28.9] - 2025-12-28
+### Changed
+- **Full SHA-256 Transition**: Removed all remaining file-size heuristics and transitioned entirely to SHA-256 hash verification for identifying original VRChat files, wrappers, and validating backups.
+- **Enhanced Logging**: Updated all log messages to display SHA-256 hash fragments instead of file sizes for better technical verification.
+
 ## [v2025.12.28.8] - 2025-12-28
 ### Improved
 - **Smart Error Attribution**: The patcher now verifies if a video error in the VRChat logs is actually related to the proxy (`whyknot.dev`) before triggering a fallback. This prevents unrelated video failures from disabling the proxy.

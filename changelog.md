@@ -1,5 +1,11 @@
 # Changelog
 
+## [v2025.12.28.2] - 2025-12-28
+### Added
+- **Smarter VRChat Lifecycle Awareness**: The patcher now automatically pauses operations when VRChat is closed and resumes once the game is detected.
+- **Proactive Patch Management**: Removed redundant "risky" warnings during runtime. The patcher now silently handles `yt-dlp.exe` regeneration by VRChat during world changes, ensuring the proxy is always correctly applied when in compatible worlds.
+- **Enhanced Log Monitoring**: Log scanning now resets and picks up the newest log file immediately upon game restart.
+
 ## [v2025.12.28.1] - 2025-12-28
 ### Added
 - **Smart Fallback System**: The patcher now monitors VRChat logs for video loading errors. If a failure is detected, Tier 1 (Proxy) is disabled for 5 minutes.

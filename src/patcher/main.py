@@ -338,9 +338,6 @@ def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
 
 def enable_patch(wrapper_file_list, is_waiting_flag):
     try:
-        if is_game_running():
-            logger.warning("VRChat is currently running. Operations might be risky.")
-
         if not os.path.exists(VRCHAT_TOOLS_DIR):
             os.makedirs(VRCHAT_TOOLS_DIR)
 
@@ -432,9 +429,6 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
 def disable_patch(wrapper_file_list):
     logger.info("Disabling patch...")
     try:
-        if is_game_running():
-            logger.warning("VRChat is currently running. Operations might be risky.")
-
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
         if os.path.exists(REDIRECTOR_LOG_PATH):
@@ -549,55 +543,53 @@ def main():
     last_instance_type = None
     is_waiting_for_vrchat_file = False
     has_logged_waiting = False
+    is_paused = False
     
-    logger.info("Scanning for existing VRChat session...")
+    logger.info("Scanning for active VRChat session...")
     
-    latest_log = find_latest_log_file()
-    if latest_log:
-        current_log_file = latest_log
-        logger.info(f"Monitoring VRChat Log: {os.path.basename(current_log_file)}")
-        try:
-            file_size = os.path.getsize(latest_log)
-            start_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
-            logger.info(f"Scanning last {round((file_size - start_pos)/1024/1024, 2)} MB of logs for state...")
-
-            with open(latest_log, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(start_pos)
-                lines = f.readlines()
-                for line in lines:
-                    instance_type = parse_instance_type_from_line(line)
-                    if instance_type:
-                        last_instance_type = instance_type
-                last_pos = f.tell()
-                
-            if last_instance_type:
-                logger.info(f"Startup State Found: World Type = {last_instance_type}")
-            else:
-                logger.info("No active instance found in recent logs. Defaulting to ENABLED (Private).")
-                last_instance_type = "private"
-
-            should_disable = last_instance_type in ['public', 'group_public']
-            desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
-            current_state = get_patch_state()
-
-            if desired_state == PatchState.ENABLED and current_state != PatchState.ENABLED:
-                logger.info(f"Applying initial state: ENABLED (Instance: {last_instance_type})")
-                enable_patch(WRAPPER_FILE_LIST, False)
-            elif desired_state == PatchState.DISABLED and current_state != PatchState.DISABLED:
-                logger.info(f"Applying initial state: DISABLED (Instance: {last_instance_type})")
-                disable_patch(WRAPPER_FILE_LIST)
-            else:
-                logger.info(f"Initial state already correct: {current_state.name} (Instance: {last_instance_type})")
-
-        except Exception as e:
-            logger.error(f"Error during startup scan: {e}")
-            last_instance_type = "private"
-
-    if not last_instance_type:
-        last_instance_type = "private"
-        
     try:
         while True:
+            game_running = is_game_running()
+            
+            if not game_running:
+                if not is_paused:
+                    logger.info("VRChat not detected. Pausing operations until game starts...")
+                    is_paused = True
+                    is_waiting_for_vrchat_file = False
+                time.sleep(POLL_INTERVAL)
+                continue
+            
+            if is_paused:
+                logger.info("VRChat detected. Resuming operations...")
+                is_paused = False
+                # Reset log state to pick up the newest log
+                current_log_file = None
+                last_pos = 0
+
+            if not current_log_file:
+                latest_log = find_latest_log_file()
+                if latest_log:
+                    current_log_file = latest_log
+                    logger.info(f"Monitoring VRChat Log: {os.path.basename(current_log_file)}")
+                    # Initial scan of the log for startup state
+                    try:
+                        file_size = os.path.getsize(latest_log)
+                        start_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
+                        with open(latest_log, 'r', encoding='utf-8', errors='replace') as f:
+                            f.seek(start_pos)
+                            lines = f.readlines()
+                            for line in lines:
+                                instance_type = parse_instance_type_from_line(line)
+                                if instance_type:
+                                    last_instance_type = instance_type
+                            last_pos = f.tell()
+                        
+                        if not last_instance_type: last_instance_type = "private"
+                        logger.info(f"Initial Instance Type: {last_instance_type}")
+                    except Exception as e:
+                        logger.error(f"Error scanning initial log: {e}")
+                        last_instance_type = "private"
+
             should_disable = last_instance_type in ['public', 'group_public']
             desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
             current_state = get_patch_state()
@@ -609,7 +601,7 @@ def main():
                     has_logged_waiting = False
                 else:
                     if not has_logged_waiting:
-                        logger.info("Waiting for VRChat to regenerate yt-dlp.exe... (Rejoin world or restart game to force generation)")
+                        logger.info("Waiting for VRChat to generate yt-dlp.exe... (Join world or restart game to force generation)")
                         has_logged_waiting = True
             else:
                 has_logged_waiting = False
@@ -634,11 +626,9 @@ def main():
             elif desired_state == current_state:
                 is_waiting_for_vrchat_file = False
             
+            # Log monitoring
             latest_log = find_latest_log_file()
-            if not latest_log:
-                time.sleep(POLL_INTERVAL); continue
-
-            if latest_log != current_log_file:
+            if latest_log and latest_log != current_log_file:
                 logger.info("-" * 30)
                 logger.info(f"New log file detected: {os.path.basename(latest_log)}")
                 logger.info("-" * 30)
@@ -646,8 +636,8 @@ def main():
                 last_pos = 0
                 instance_info_cache.clear()
             
-            try:
-                if os.path.exists(current_log_file):
+            if current_log_file and os.path.exists(current_log_file):
+                try:
                     current_size = os.path.getsize(current_log_file)
                     if last_pos > current_size: last_pos = 0 
                     
@@ -668,8 +658,8 @@ def main():
                                         logger.info(f"Detected instance change: {last_instance_type} -> {instance_type}")
                                         last_instance_type = instance_type
                                         is_waiting_for_vrchat_file = False 
-            except Exception:
-                pass
+                except Exception:
+                    pass
             
             time.sleep(POLL_INTERVAL)
     

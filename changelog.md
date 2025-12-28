@@ -1,5 +1,10 @@
 # Changelog
 
+## [v2025.12.28.6] - 2025-12-28
+### Added
+- **SHA-256 Verification**: Replaced unreliable file-size checks with SHA-256 hash verification. The patcher now precisely identifies its own wrapper and ensures that VRChat's original files are never misidentified or accidentally overwritten.
+- **Enhanced Backup Safety**: Backups and restorations now verify file integrity via hashes, preventing "wrapper-on-wrapper" backups or incorrect file restorations.
+
 ## [v2025.12.28.5] - 2025-12-28
 ### Improved
 - **Build Script**: Updated `build.ps1` to use `python -m pip` for upgrading pip, ensuring smoother automated dependency management on Windows.

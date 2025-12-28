@@ -5,6 +5,10 @@ import subprocess
 import re
 import threading
 import platform
+import json
+import time
+import urllib.request
+import urllib.error
 from urllib.parse import quote_plus
 from logging import FileHandler
 
@@ -28,6 +32,7 @@ def get_application_path():
 
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
+WRAPPER_STATE_PATH = os.path.join(APP_BASE_PATH, 'wrapper_state.json')
 
 LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
@@ -52,6 +57,16 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
+
+def check_proxy_online():
+    try:
+        logger.info(f"Checking if proxy is online: {REMOTE_SERVER_BASE}")
+        req = urllib.request.Request(REMOTE_SERVER_BASE, method='HEAD')
+        with urllib.request.urlopen(req, timeout=2.0) as response:
+            return response.status == 200
+    except Exception as e:
+        logger.warning(f"Proxy health check failed: {e}")
+        return False
 
 def find_url_in_args(args_list):
     for arg in args_list:
@@ -120,6 +135,27 @@ def attempt_executable(executable_path, executable_name, incoming_args, use_cust
     return final_url_output, return_code
 
 def process_and_execute(incoming_args):
+    proxy_disabled = False
+    
+    # Check for fallback state
+    if os.path.exists(WRAPPER_STATE_PATH):
+        try:
+            with open(WRAPPER_STATE_PATH, 'r') as f:
+                state = json.load(f)
+                if state.get('force_fallback', False):
+                    fallback_until = state.get('fallback_until', 0)
+                    if time.time() < fallback_until:
+                        logger.warning(f"Fallback mode active (Expires: {time.ctime(fallback_until)}). Disabling Tier 1 (Proxy).")
+                        proxy_disabled = True
+        except Exception as e:
+            logger.error(f"Failed to read wrapper state: {e}")
+
+    # Health check the proxy if not already disabled
+    if not proxy_disabled:
+        if not check_proxy_online():
+            logger.warning("Proxy is offline or unreachable. Disabling Tier 1 (Proxy).")
+            proxy_disabled = True
+
     target_url = find_url_in_args(incoming_args)
     logger.info(f"URL found in arguments: {target_url}")
 
@@ -133,9 +169,9 @@ def process_and_execute(incoming_args):
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
     is_youtube_url = target_url and not is_already_proxied and re.search(r'youtube\.com|youtu\.be', target_url)
     
-    logger.info(f"Analysis: Is YouTube? {bool(is_youtube_url)}. Is already proxied? {is_already_proxied}.")
+    logger.info(f"Analysis: Is YouTube? {bool(is_youtube_url)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}")
 
-    if is_youtube_url:
+    if is_youtube_url and not proxy_disabled:
         logger.info("Tier 1: YouTube URL detected. Returning proxied URL directly.")
         encoded_youtube_url = quote_plus(target_url)
         new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
@@ -145,13 +181,13 @@ def process_and_execute(incoming_args):
         logger.info(f"Successfully sent final URL to VRChat: {new_url}")
         return 0 
 
-    if is_already_proxied:
+    if is_already_proxied and not proxy_disabled:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
         print(target_url, flush=True) 
         logger.info(f"Successfully sent final URL to VRChat: {target_url}")
         return 0
     
-    logger.info("Tier 2: Non-YouTube URL. Attempting to resolve with yt-dlp-latest.exe...")
+    logger.info("Tier 2: Non-YouTube URL (or Proxy Disabled). Attempting to resolve with yt-dlp-latest.exe...")
     
     tier_2_args = []
     skip_next = False

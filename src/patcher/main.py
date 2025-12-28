@@ -194,6 +194,26 @@ TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
 ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
 SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
 REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
+WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
+
+def update_wrapper_state(is_broken=False):
+    try:
+        state = {}
+        if os.path.exists(WRAPPER_STATE_PATH):
+            try:
+                with open(WRAPPER_STATE_PATH, 'r') as f:
+                    state = json.load(f)
+            except Exception: pass
+        
+        if is_broken:
+            state['force_fallback'] = True
+            state['fallback_until'] = time.time() + 300  # Disable for 5 minutes
+            logger.warning(f"Marking proxy as unstable for 5 minutes (until {time.ctime(state['fallback_until'])})")
+        
+        with open(WRAPPER_STATE_PATH, 'w') as f:
+            json.dump(state, f)
+    except Exception as e:
+        logger.error(f"Failed to update wrapper state: {e}")
 
 def check_for_updates():
     if "dev" in CURRENT_VERSION:
@@ -638,6 +658,11 @@ def main():
                             if new_lines:
                                 last_pos = f.tell()
                                 for line in new_lines:
+                                    # Video Error Detection
+                                    if any(x in line for x in ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error"]):
+                                        logger.warning(f"Detected Video Error in VRChat log: {line.strip()}")
+                                        update_wrapper_state(is_broken=True)
+
                                     instance_type = parse_instance_type_from_line(line)
                                     if instance_type and instance_type != last_instance_type:
                                         logger.info(f"Detected instance change: {last_instance_type} -> {instance_type}")

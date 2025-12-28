@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2025.12.28.3] - 2025-12-28
+### Added
+- **PID-Locked Monitoring**: Patcher now uniquely identifies VRChat sessions via PID/creation time, preventing log ghosting across restarts.
+- **Support File Health Check**: Periodic verification ensuring all wrapper dependencies (`deno.exe`, etc.) remain in the `Tools` directory.
+- **Proactive File Watchdog**: High-frequency verification of `yt-dlp.exe` to instantly re-apply the patch if VRChat restores the original file.
+- **Atomic Session Discovery**: Reset log parsing state immediately upon detecting a new game process.
+
 ## [v2025.12.28.2] - 2025-12-28
 ### Added
 - **Smarter VRChat Lifecycle Awareness**: The patcher now automatically pauses operations when VRChat is closed and resumes once the game is detected.

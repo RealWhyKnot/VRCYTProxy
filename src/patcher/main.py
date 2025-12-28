@@ -23,7 +23,7 @@ if platform.system() == 'Windows':
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v2025.12.28.10"
+    CURRENT_VERSION = "v2025.12.28.11"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"

@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.28.11] - 2025-12-28
+### Changed
+- **Dependency Update**: Updated `yt-dlp` to 2025.12.08 and `Deno` to v2.6.3 for improved video resolution and stability.
+
 ## [v2025.12.28.10] - 2025-12-28
 ### Fixed
 - **Build Stabilization**: Minor fixes to the patcher logic and build process verification.

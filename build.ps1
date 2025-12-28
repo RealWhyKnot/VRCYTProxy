@@ -94,13 +94,14 @@ try {
         Write-Host "Creating virtual environment..."
         & $PythonExe -m venv $VenvDir 
     }
+    $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
     $VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
     $VenvPyInstaller = Join-Path $VenvDir "Scripts\pyinstaller.exe"
     Write-Host "Virtual Env: $VenvDir"
 
     Write-Host "[2/6] Installing/Updating dependencies..." -ForegroundColor Green
     $env:PYINSTALLER_COMPILE_BOOTLOADER = "1"
-    & $VenvPip install --upgrade pip
+    & $VenvPython -m pip install --upgrade pip
     & $VenvPip install --force-reinstall --no-cache-dir pyinstaller
     Write-Host "Dependencies installed."
 

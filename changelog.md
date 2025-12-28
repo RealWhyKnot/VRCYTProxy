@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.28.5] - 2025-12-28
+### Improved
+- **Build Script**: Updated `build.ps1` to use `python -m pip` for upgrading pip, ensuring smoother automated dependency management on Windows.
+
 ## [v2025.12.28.4] - 2025-12-28
 ### Fixed
 - **Game Detection**: Switched to `tasklist` as the primary process detection method to improve reliability across different Windows installations where `wmic` might be deprecated or slow.

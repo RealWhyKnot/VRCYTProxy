@@ -48,6 +48,7 @@ STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
 
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
 ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
+SECURE_BACKUP_NAME = 'yt-dlp-og-secure.exe'
 TARGET_EXE_NAME = 'yt-dlp.exe'
 WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
 
@@ -191,6 +192,7 @@ VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
 VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
 TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
 ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
+SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
 REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
 
 def check_for_updates():
@@ -219,6 +221,15 @@ def safe_get_size(filepath):
     try:
         return os.path.getsize(filepath)
     except FileNotFoundError: return 0
+
+def is_game_running():
+    try:
+        # Using tasklist to check for VRChat.exe
+        import subprocess
+        output = subprocess.check_output('tasklist /FI "IMAGENAME eq VRChat.exe" /NH', shell=True).decode()
+        return "VRChat.exe" in output
+    except Exception:
+        return False
 
 def tail_log_file(log_path, stop_event):
     logger.info(f"Starting to monitor wrapper log: {log_path}")
@@ -307,6 +318,9 @@ def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
 
 def enable_patch(wrapper_file_list, is_waiting_flag):
     try:
+        if is_game_running():
+            logger.warning("VRChat is currently running. Operations might be risky.")
+
         if not os.path.exists(VRCHAT_TOOLS_DIR):
             os.makedirs(VRCHAT_TOOLS_DIR)
 
@@ -317,30 +331,59 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         if is_target_vrchat_file:
             logger.info(f"Enabling patch. Found original VRChat file ({target_size} bytes).")
             
-            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                logger.info(f"Creating secure backup copy at '{ORIGINAL_EXE_NAME}'...")
+            # Secure Backup Logic
+            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) or safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                logger.info(f"Creating primary backup copy at '{ORIGINAL_EXE_NAME}'...")
                 retry_operation(lambda: shutil.copy2(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
             
+            if not os.path.exists(SECURE_BACKUP_PATH) or safe_get_size(SECURE_BACKUP_PATH) < VRC_YTDLP_MIN_SIZE_BYTES:
+                 logger.info(f"Creating secondary secure backup at '{SECURE_BACKUP_NAME}'...")
+                 retry_operation(lambda: shutil.copy2(TARGET_YTDLP_PATH, SECURE_BACKUP_PATH))
+            
             backup_size = safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH)
-            logger.info(f"Backup Verification: Size={backup_size} bytes.")
+            secure_backup_size = safe_get_size(SECURE_BACKUP_PATH)
+            logger.info(f"Backup Verification: Primary={backup_size} bytes, Secure={secure_backup_size} bytes.")
 
-            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) or backup_size < VRC_YTDLP_MIN_SIZE_BYTES:
-                logger.error("Backup failed or corrupted! Aborting enable to protect original file.")
+            if backup_size < VRC_YTDLP_MIN_SIZE_BYTES and secure_backup_size < VRC_YTDLP_MIN_SIZE_BYTES:
+                logger.error("Both backups failed or are corrupted! Aborting enable to protect original file.")
                 return False, is_waiting_flag
-                
+            
+            # Ensure we have at least one valid backup
+            if backup_size < VRC_YTDLP_MIN_SIZE_BYTES and secure_backup_size >= VRC_YTDLP_MIN_SIZE_BYTES:
+                 logger.warning("Primary backup corrupted, restoring from secure backup...")
+                 retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
+
             logger.info("Backup confirmed. Removing original executable to replace with wrapper...")
             retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
 
         elif is_target_old_wrapper:
             logger.info("Updating existing wrapper...")
-            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                 logger.error("Backup missing! Cannot safely update. Please verify game integrity.")
+            
+            # Check for at least one valid backup
+            backup_exists = os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES
+            secure_exists = os.path.exists(SECURE_BACKUP_PATH) and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES
+
+            if not backup_exists and not secure_exists:
+                 logger.error("All backups missing! Cannot safely update. Please verify game integrity.")
                  return False, is_waiting_flag
+            
+            # Sync backups if one is missing
+            if backup_exists and not secure_exists:
+                logger.info("Restoring missing secure backup from primary...")
+                retry_operation(lambda: shutil.copy2(ORIGINAL_YTDLP_BACKUP_PATH, SECURE_BACKUP_PATH))
+            elif secure_exists and not backup_exists:
+                logger.info("Restoring missing primary backup from secure...")
+                retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
 
         elif target_size == 0:
-            if not os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                logger.info("Target missing and no backup found. Waiting for generation.")
-                return False, True
+            if not (os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES):
+                 # Check secure backup before giving up
+                 if os.path.exists(SECURE_BACKUP_PATH) and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+                     logger.info("Primary backup missing, but secure backup found. Restoring primary...")
+                     retry_operation(lambda: shutil.copy2(SECURE_BACKUP_PATH, ORIGINAL_YTDLP_BACKUP_PATH))
+                 else:
+                    logger.info("Target missing and no valid backups found. Waiting for generation.")
+                    return False, True
 
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
@@ -369,6 +412,9 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
 def disable_patch(wrapper_file_list):
     logger.info("Disabling patch...")
     try:
+        if is_game_running():
+            logger.warning("VRChat is currently running. Operations might be risky.")
+
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
         if os.path.exists(REDIRECTOR_LOG_PATH):
@@ -376,7 +422,15 @@ def disable_patch(wrapper_file_list):
                 retry_operation(lambda: os.remove(REDIRECTOR_LOG_PATH))
             except Exception: pass
 
-        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+        # Determine best backup to restore
+        restore_source = None
+        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH) and safe_get_size(ORIGINAL_YTDLP_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+            restore_source = ORIGINAL_YTDLP_BACKUP_PATH
+        elif os.path.exists(SECURE_BACKUP_PATH) and safe_get_size(SECURE_BACKUP_PATH) >= VRC_YTDLP_MIN_SIZE_BYTES:
+            restore_source = SECURE_BACKUP_PATH
+            logger.warning("Primary backup missing or invalid. Using secure backup.")
+
+        if restore_source:
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_size = safe_get_size(TARGET_YTDLP_PATH)
                 
@@ -386,8 +440,8 @@ def disable_patch(wrapper_file_list):
                 else:
                     logger.info(f"Target is already a large file ({current_size} bytes). Overwriting with backup to be safe.")
             
-            logger.info("Restoring original file from backup...")
-            retry_operation(lambda: shutil.copy2(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH))
+            logger.info(f"Restoring original file from {os.path.basename(restore_source)}...")
+            retry_operation(lambda: shutil.copy2(restore_source, TARGET_YTDLP_PATH))
             logger.info("Patch disabled successfully (Original file restored).")
         else:
             if os.path.exists(TARGET_YTDLP_PATH):

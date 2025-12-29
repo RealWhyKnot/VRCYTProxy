@@ -23,7 +23,7 @@ if platform.system() == 'Windows':
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v2025.12.29.1"
+    CURRENT_VERSION = "v2025.12.29.2"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -153,17 +153,32 @@ def setup_logging():
 logger = setup_logging()
 
 def load_config(config_path):
+    defaults = {
+        "video_error_patterns": ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error", "[VideoTXL]"],
+        "instance_patterns": {
+            "invite": "~private",
+            "friends+": "~hidden",
+            "friends": "~friends",
+            "group_public": "groupAccessType(public)",
+            "group_plus": "groupAccessType(plus)",
+            "group": "~group"
+        },
+        "proxy_domain": "whyknot.dev"
+    }
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r', encoding='utf-8-sig') as f:
-                return json.load(f)
+                config = json.load(f)
+                for k, v in defaults.items():
+                    if k not in config: config[k] = v
+                return config
         except Exception:
             logger.error(f"Failed to load config from {config_path}", exc_info=True)
-    return {}
+    return defaults
 
 def save_config(config_path, config_data):
     try:
-        with open(config_path, 'w') as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=2)
     except Exception:
         logger.error(f"Failed to save config to {config_path}", exc_info=True)
@@ -180,7 +195,9 @@ def prompt_for_log_dir(config_path):
         user_path = input("Enter VRChat log path: ").strip()
         if os.path.exists(user_path) and os.path.isdir(user_path):
             logger.info(f"User provided valid path: {user_path}")
-            save_config(config_path, {'vrchat_log_dir': user_path})
+            cfg = load_config(config_path)
+            cfg['vrchat_log_dir'] = user_path
+            save_config(config_path, cfg)
             return user_path
         else:
             logger.error(f"Invalid path provided: {user_path}")
@@ -197,10 +214,12 @@ def get_vrchat_log_dir(base_path):
     for path in get_platform_default_paths():
         if os.path.exists(path) and os.path.isdir(path):
             logger.info(f"Found VRChat log directory at: {path}")
-            save_config(config_path, {'vrchat_log_dir': path})
+            config['vrchat_log_dir'] = path
+            save_config(config_path, config)
             return path
     return prompt_for_log_dir(config_path)
 
+CONFIG = load_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME))
 VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
 VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
 TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
@@ -209,9 +228,9 @@ SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
 REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
 WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
 
-def update_wrapper_state(is_broken=False):
+def update_wrapper_state(is_broken=False, duration=None):
     try:
-        state = {}
+        state = {'consecutive_errors': 0}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
@@ -219,9 +238,23 @@ def update_wrapper_state(is_broken=False):
             except Exception: pass
         
         if is_broken:
+            count = state.get('consecutive_errors', 0) + 1
+            state['consecutive_errors'] = count
             state['force_fallback'] = True
-            state['fallback_until'] = time.time() + 300  # Disable for 5 minutes
-            logger.warning(f"Marking proxy as unstable for 5 minutes (until {time.ctime(state['fallback_until'])})")
+            
+            if duration:
+                wait_time = duration
+            else:
+                if count <= 1: wait_time = 60 # Transient
+                elif count == 2: wait_time = 300 # Standard
+                elif count == 3: wait_time = 900 # Extended
+                else: wait_time = 3600 # Max
+                
+            state['fallback_until'] = time.time() + wait_time
+            logger.warning(f"Proxy Error #{count}. Falling back for {wait_time}s (until {time.ctime(state['fallback_until'])})")
+        else:
+            state['consecutive_errors'] = 0
+            state['force_fallback'] = False
         
         with open(WRAPPER_STATE_PATH, 'w') as f:
             json.dump(state, f)
@@ -557,25 +590,74 @@ instance_info_cache = {}
 def parse_instance_type_from_line(line):
     if '[Behaviour] Destination set:' in line or '[Behaviour] Joining' in line:
         wrld_match = re.search(r'(wrld_[a-f0-9\-]+)', line)
-        if not wrld_match:
-            return None
-            
+        if not wrld_match: return None
         world_str = line[wrld_match.start():]
+        patterns = CONFIG.get("instance_patterns", {})
         
         if ':' in world_str:
-            if '~private' in world_str: return 'invite'
-            if '~hidden' in world_str: return 'friends+'
-            if '~friends' in world_str: return 'friends'
+            if patterns.get("invite") in world_str: return 'invite'
+            if patterns.get("friends+") in world_str: return 'friends+'
+            if patterns.get("friends") in world_str: return 'friends'
             
-            if '~group' in world_str:
-                if 'groupAccessType(public)' in world_str: return 'group_public'
-                if 'groupAccessType(plus)' in world_str: return 'group_plus'
+            if patterns.get("group") in world_str:
+                if patterns.get("group_public") in world_str: return 'group_public'
+                if patterns.get("group_plus") in world_str: return 'group_plus'
                 return 'group'
             
             return 'public'
         else:
             return 'public'
     return None
+
+class LogMonitor:
+    def __init__(self):
+        self.current_log = None
+        self.last_pos = 0
+        self.last_instance_type = "private"
+        self.proxy_domain = CONFIG.get("proxy_domain", "whyknot.dev")
+        self.error_patterns = CONFIG.get("video_error_patterns", [])
+
+    def update_log_file(self, path):
+        if path != self.current_log:
+            self.current_log = path
+            self.last_pos = 0
+            logger.info(f"Monitoring Log: {os.path.basename(path)}")
+            try:
+                file_size = os.path.getsize(path)
+                self.last_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
+            except Exception: pass
+
+    def tick(self):
+        if not self.current_log or not os.path.exists(self.current_log): return
+        
+        try:
+            current_size = os.path.getsize(self.current_log)
+            if self.last_pos > current_size: self.last_pos = 0
+            
+            if current_size > self.last_pos:
+                with open(self.current_log, 'r', encoding='utf-8', errors='replace') as f:
+                    f.seek(self.last_pos)
+                    new_lines = f.readlines()
+                    if new_lines:
+                        self.last_pos = f.tell()
+                        for line in new_lines:
+                            if any(x in line for x in self.error_patterns):
+                                if self.proxy_domain in line:
+                                    logger.warning(f"Detected Proxy Video Error: {line.strip()}")
+                                    update_wrapper_state(is_broken=True)
+                                else:
+                                    logger.info(f"Detected Non-Proxy Video Error: {line.strip()}")
+
+                            it = parse_instance_type_from_line(line)
+                            if it and it != self.last_instance_type:
+                                logger.info(f"Instance changed: {self.last_instance_type} -> {it}")
+                                self.last_instance_type = it
+        except Exception: pass
+
+def log_monitor_thread_func(monitor, stop_event):
+    while not stop_event.is_set():
+        monitor.tick()
+        time.sleep(0.1) # 100ms response time
 
 def cleanup_on_exit():
     logger.info("Performing exit cleanup...")
@@ -606,12 +688,16 @@ def main():
         input("Press Enter to exit..."); sys.exit(1)
 
     stop_event = threading.Event()
+    
+    # Start Redirector Log Thread
     log_tail_thread = threading.Thread(target=tail_log_file, args=(REDIRECTOR_LOG_PATH, stop_event), daemon=True)
     log_tail_thread.start()
 
-    current_log_file = None
-    last_pos = 0
-    last_instance_type = None
+    # Start VRChat Log Monitor Thread
+    monitor = LogMonitor()
+    vrc_monitor_thread = threading.Thread(target=log_monitor_thread_func, args=(monitor, stop_event), daemon=True)
+    vrc_monitor_thread.start()
+
     is_paused = False
     current_game_pid = None
     current_game_time = None
@@ -623,7 +709,7 @@ def main():
     
     try:
         while True:
-            # 1. Process Check (Every poll cycle)
+            # 1. Process Check
             game_pid, game_time = is_game_running()
             
             if not game_pid:
@@ -635,7 +721,6 @@ def main():
                 time.sleep(POLL_INTERVAL)
                 continue
             
-            # Check for session change (restart or first detection)
             if game_pid != current_game_pid or game_time != current_game_time:
                 if current_game_pid:
                     logger.info(f"VRChat session change detected (PID: {game_pid}). Resetting log monitor.")
@@ -645,40 +730,18 @@ def main():
                 is_paused = False
                 current_game_pid = game_pid
                 current_game_time = game_time
-                current_log_file = None
-                last_pos = 0
+                monitor.current_log = None # Force re-discovery
 
             # 2. Log Discovery (Continuous check for the best log)
             latest_log = find_latest_log_file()
-            if latest_log and latest_log != current_log_file:
-                # If we have no log, OR a newer one exists (by filename timestamp)
-                if not current_log_file or latest_log > current_log_file:
-                    current_log_file = latest_log
-                    logger.info(f"Monitoring Log: {os.path.basename(current_log_file)}")
-                    last_pos = 0 # Reset position for new log
-                    try:
-                        file_size = os.path.getsize(latest_log)
-                        start_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
-                        with open(latest_log, 'r', encoding='utf-8', errors='replace') as f:
-                            f.seek(start_pos)
-                            lines = f.readlines()
-                            for line in lines:
-                                instance_type = parse_instance_type_from_line(line)
-                                if instance_type:
-                                    last_instance_type = instance_type
-                            last_pos = f.tell()
-                        
-                        if not last_instance_type: last_instance_type = "private"
-                        logger.info(f"Initial Instance Type: {last_instance_type}")
-                    except Exception as e:
-                        logger.error(f"Error scanning log: {e}")
-                        last_instance_type = "private"
+            if latest_log and (not monitor.current_log or latest_log > monitor.current_log):
+                monitor.update_log_file(latest_log)
 
             now = time.time()
             
-            # 3. Proactive File Watch (Higher frequency check for yt-dlp regeneration)
+            # 3. Proactive File Watch
             if now - last_file_watch_time > 1.0:
-                should_disable = last_instance_type in ['public', 'group_public']
+                should_disable = monitor.last_instance_type in ['public', 'group_public']
                 desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
                 current_state = get_patch_state()
                 
@@ -691,37 +754,11 @@ def main():
                 
                 last_file_watch_time = now
 
-            # 4. Health Check (Every 10s while enabled)
+            # 4. Health Check
             if now - last_health_check_time > 10.0:
                 if get_patch_state() == PatchState.ENABLED:
                     check_wrapper_health(WRAPPER_FILE_LIST)
                 last_health_check_time = now
-
-            # 5. Log Monitoring
-            if current_log_file and os.path.exists(current_log_file):
-                try:
-                    current_size = os.path.getsize(current_log_file)
-                    if last_pos > current_size: last_pos = 0 
-                    
-                    if current_size > last_pos:
-                        with open(current_log_file, 'r', encoding='utf-8', errors='replace') as f:
-                            f.seek(last_pos)
-                            new_lines = f.readlines()
-                            if new_lines:
-                                last_pos = f.tell()
-                                for line in new_lines:
-                                    if any(x in line for x in ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error"]):
-                                        if "whyknot.dev" in line:
-                                            logger.warning(f"Detected Proxy Video Error: {line.strip()}")
-                                            update_wrapper_state(is_broken=True)
-                                        else:
-                                            logger.info(f"Detected Non-Proxy Video Error (Ignoring fallback): {line.strip()}")
-
-                                    instance_type = parse_instance_type_from_line(line)
-                                    if instance_type and instance_type != last_instance_type:
-                                        logger.info(f"Instance changed: {last_instance_type} -> {instance_type}")
-                                        last_instance_type = instance_type
-                except Exception: pass
             
             time.sleep(POLL_INTERVAL)
     

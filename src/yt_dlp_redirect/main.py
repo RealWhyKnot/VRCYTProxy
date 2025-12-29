@@ -58,12 +58,31 @@ def setup_logging():
 
 logger = setup_logging()
 
+def update_wrapper_success():
+    try:
+        if os.path.exists(WRAPPER_STATE_PATH):
+            with open(WRAPPER_STATE_PATH, 'r') as f:
+                state = json.load(f)
+            if state.get('consecutive_errors', 0) > 0 or state.get('force_fallback', False):
+                state['consecutive_errors'] = 0
+                state['force_fallback'] = False
+                with open(WRAPPER_STATE_PATH, 'w') as f:
+                    json.dump(state, f)
+                logger.info("Successfully reset proxy error state.")
+    except Exception: pass
+
 def check_proxy_online():
     try:
         logger.info(f"Checking if proxy is online: {REMOTE_SERVER_BASE}")
         req = urllib.request.Request(REMOTE_SERVER_BASE, method='HEAD')
         with urllib.request.urlopen(req, timeout=2.0) as response:
             return response.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            logger.error(f"Proxy Server Error (5xx): {e.code}. This will trigger immediate fallback.")
+        else:
+            logger.warning(f"Proxy returned HTTP Error: {e.code}")
+        return False
     except Exception as e:
         logger.warning(f"Proxy health check failed: {e}")
         return False
@@ -177,12 +196,14 @@ def process_and_execute(incoming_args):
         new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
         
         logger.info(f"Rewriting URL to: {new_url}")
+        update_wrapper_success()
         print(new_url, flush=True)
         logger.info(f"Successfully sent final URL to VRChat: {new_url}")
         return 0 
 
     if is_already_proxied and not proxy_disabled:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
+        update_wrapper_success()
         print(target_url, flush=True) 
         logger.info(f"Successfully sent final URL to VRChat: {target_url}")
         return 0

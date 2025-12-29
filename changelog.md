@@ -1,5 +1,13 @@
 # Changelog
 
+## [v2025.12.29.2] - 2025-12-29
+### Added
+- **Externalized Patterns**: Video error and instance detection patterns are now stored in `patcher_config.json`, allowing for updates without code changes.
+- **High-Frequency Monitoring**: Refactored VRChat log monitoring into a dedicated 100ms background thread. This ensures millisecond-level responsiveness to world changes and video errors.
+- **Tiered Fallback System**: Proxy errors now trigger escalating fallback durations (1m for transient, 5m for standard, 15m/1h for repeated).
+- **Smart Error Reset**: The wrapper now resets the consecutive error count upon a successful proxy resolution, preventing permanent escalation from old failures.
+- **Enhanced Error Detection**: Added support for detecting `[VideoTXL]` errors and specific `5xx` proxy server responses for immediate fallback.
+
 ## [v2025.12.29.1] - 2025-12-29
 ### Fixed
 - **Dynamic Log Discovery**: The patcher now continuously checks for newer log files during a session. This prevents it from getting stuck on an old log file if the current session's log is created slightly after the game process is detected.

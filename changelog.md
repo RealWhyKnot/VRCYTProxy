@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.29.1] - 2025-12-29
+### Fixed
+- **Dynamic Log Discovery**: The patcher now continuously checks for newer log files during a session. This prevents it from getting stuck on an old log file if the current session's log is created slightly after the game process is detected.
+
 ## [v2025.12.29.0] - 2025-12-29
 ### Fixed
 - **Log Selection**: Improved log file discovery by sorting by filename (lexicographical) instead of modification time. This ensures the newest VRChat log is always targeted correctly based on its timestamped naming convention.

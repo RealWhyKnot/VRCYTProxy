@@ -23,7 +23,7 @@ if platform.system() == 'Windows':
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v2025.12.29.0"
+    CURRENT_VERSION = "v2025.12.29.1"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -648,12 +648,14 @@ def main():
                 current_log_file = None
                 last_pos = 0
 
-            # 2. Log Discovery (If needed or session changed)
-            if not current_log_file:
-                latest_log = find_latest_log_file()
-                if latest_log:
+            # 2. Log Discovery (Continuous check for the best log)
+            latest_log = find_latest_log_file()
+            if latest_log and latest_log != current_log_file:
+                # If we have no log, OR a newer one exists (by filename timestamp)
+                if not current_log_file or latest_log > current_log_file:
                     current_log_file = latest_log
                     logger.info(f"Monitoring Log: {os.path.basename(current_log_file)}")
+                    last_pos = 0 # Reset position for new log
                     try:
                         file_size = os.path.getsize(latest_log)
                         start_pos = max(0, file_size - STARTUP_SCAN_DEPTH)

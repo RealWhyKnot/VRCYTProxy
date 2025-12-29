@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2025.12.29.0] - 2025-12-29
+### Fixed
+- **Log Selection**: Improved log file discovery by sorting by filename (lexicographical) instead of modification time. This ensures the newest VRChat log is always targeted correctly based on its timestamped naming convention.
+
 ## [v2025.12.28.11] - 2025-12-28
 ### Changed
 - **Dependency Update**: Updated `yt-dlp` to 2025.12.08 and `Deno` to v2.6.3 for improved video resolution and stability.

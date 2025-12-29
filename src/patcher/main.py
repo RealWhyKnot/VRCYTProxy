@@ -23,7 +23,7 @@ if platform.system() == 'Windows':
 try:
     from _version import __version__ as CURRENT_VERSION
 except ImportError:
-    CURRENT_VERSION = "v2025.12.28.11"
+    CURRENT_VERSION = "v2025.12.29.0"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -329,7 +329,7 @@ def tail_log_file(log_path, stop_event):
 def find_latest_log_file():
     try:
         list_of_files = glob.glob(os.path.join(VRCHAT_LOG_DIR, 'output_log_*.txt'))
-        return max(list_of_files, key=os.path.getmtime) if list_of_files else None
+        return max(list_of_files) if list_of_files else None
     except Exception: return None
 
 def retry_operation(func, retries=5, delay=0.5):

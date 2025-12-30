@@ -1,5 +1,11 @@
 # Changelog
 
+## [v2025.12.30.0] - 2025-12-30
+### Fixed
+- **OS Error 22 (Invalid Argument)**: Resolved a crash in the redirector caused by `print` calls failing when VRChat closed its output pipe prematurely. All communication with VRChat is now wrapped in safety checks.
+- **Subprocess Robustness**: Enhanced `attempt_executable` with automated argument sanitization (removing null bytes) and Win32 `CREATE_NO_WINDOW` flags to improve reliability when launching bundled tools.
+- **Improved Logging**: Added detailed error reporting for failed process launches and stdout pipe closures.
+
 ## [v2025.12.29.2] - 2025-12-29
 ### Added
 - **Externalized Patterns**: Video error and instance detection patterns are now stored in `patcher_config.json`, allowing for updates without code changes.

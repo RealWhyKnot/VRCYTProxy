@@ -58,6 +58,12 @@ def setup_logging():
 
 logger = setup_logging()
 
+def safe_print(text):
+    try:
+        print(text, flush=True)
+    except OSError as e:
+        logger.error(f"Failed to print to stdout (VRChat pipe likely closed): {e}")
+
 def update_wrapper_success():
     try:
         if os.path.exists(WRAPPER_STATE_PATH):
@@ -99,7 +105,8 @@ def attempt_executable(executable_path, executable_name, incoming_args, use_cust
         logger.error(f"Executable '{executable_name}' not found at '{executable_path}'.")
         return None, -1
 
-    command = [executable_path] + incoming_args
+    sanitized_args = [str(arg).replace('\0', '') for arg in incoming_args]
+    command = [executable_path] + sanitized_args
     logger.info(f"Executing command: {subprocess.list2cmdline(command)}")
     
     process_env = os.environ.copy()
@@ -109,15 +116,24 @@ def attempt_executable(executable_path, executable_name, incoming_args, use_cust
         process_env['TMP'] = APP_BASE_PATH
         logger.info(f"Setting TEMP/TMP (temp dir) to: {APP_BASE_PATH}")
     
-    process = subprocess.Popen(
-        command, 
-        stdout=subprocess.PIPE, 
-        stderr=subprocess.PIPE, 
-        text=True, 
-        encoding='utf-8', 
-        errors='replace',
-        env=process_env
-    )
+    try:
+        creation_flags = 0
+        if platform.system() == 'Windows':
+            creation_flags = 0x08000000 # CREATE_NO_WINDOW
+
+        process = subprocess.Popen(
+            command, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True, 
+            encoding='utf-8', 
+            errors='replace',
+            env=process_env,
+            creationflags=creation_flags
+        )
+    except OSError as e:
+        logger.error(f"Failed to launch executable '{executable_name}': {e}")
+        return None, -1
 
     stdout_lines = []
     stderr_lines = []
@@ -182,7 +198,7 @@ def process_and_execute(incoming_args):
         logger.warning("No URL found in arguments. Passing to VRChat's yt-dlp as a fallback.")
         final_output, return_code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args)
         if final_output:
-            print(final_output, flush=True)
+            safe_print(final_output)
         return return_code
 
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
@@ -197,14 +213,14 @@ def process_and_execute(incoming_args):
         
         logger.info(f"Rewriting URL to: {new_url}")
         update_wrapper_success()
-        print(new_url, flush=True)
+        safe_print(new_url)
         logger.info(f"Successfully sent final URL to VRChat: {new_url}")
         return 0 
 
     if is_already_proxied and not proxy_disabled:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
         update_wrapper_success()
-        print(target_url, flush=True) 
+        safe_print(target_url) 
         logger.info(f"Successfully sent final URL to VRChat: {target_url}")
         return 0
     
@@ -237,7 +253,7 @@ def process_and_execute(incoming_args):
     
     if return_code == 0 and resolved_url and resolved_url.startswith('http'):
         logger.info(f"Tier 2 success. Returning URL: {resolved_url}")
-        print(resolved_url, flush=True)
+        safe_print(resolved_url)
         return 0
     else:
         logger.warning(f"Tier 2 failed (Code: {return_code}) or returned invalid URL. Output: {resolved_url}")
@@ -251,7 +267,7 @@ def process_and_execute(incoming_args):
     
     if final_output:
         logger.info(f"Tier 3 finished. Returning output to VRChat: {final_output}")
-        print(final_output, flush=True)
+        safe_print(final_output)
     else:
         logger.error(f"Tier 3 finished (Code: {return_code}) but produced no output.")
         sys.stderr.write(f"Wrapper Error: Tier 3 failed. Check {LOG_FILE_NAME}\n")

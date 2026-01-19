@@ -108,13 +108,13 @@ try {
     
     # Force wipe existing environment
     Write-Host "Wiping existing Conda environment '$CondaEnvName'..."
-    & conda remove -n $CondaEnvName --all -y 2>$null
+    & conda.exe remove -n $CondaEnvName --all -y 2>$null
     
     Write-Host "Creating fresh Conda environment '$CondaEnvName'..."
-    & conda create -n $CondaEnvName python=3.10 -y
+    & conda.exe create -n $CondaEnvName python=3.13 -y
 
     # Get paths from conda
-    $EnvInfo = & conda run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
+    $EnvInfo = & conda.exe run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
     $EnvInfoLines = $EnvInfo -split "`r`n"
     $VenvPython = $EnvInfoLines[0].Trim()
     $VenvScripts = $EnvInfoLines[1].Trim()
@@ -175,7 +175,7 @@ try {
     if ($IconArg) { $RedirectorArgs += "--icon", $IconPath }
     $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
 
-    & conda run -n $CondaEnvName pyinstaller @RedirectorArgs
+    & conda.exe run -n $CondaEnvName pyinstaller @RedirectorArgs
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
@@ -203,7 +203,7 @@ try {
     if ($IconArg) { $PatcherArgs += "--icon", $IconPath }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
-    & conda run -n $CondaEnvName pyinstaller @PatcherArgs
+    & conda.exe run -n $CondaEnvName pyinstaller @PatcherArgs
         
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 

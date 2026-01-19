@@ -24,7 +24,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.01.18.dev-main-7824482"
+    CURRENT_VERSION = "v2026.01.19.dev-main-af4d0dd"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"

@@ -1,5 +1,11 @@
 # Changelog
 
+## [v2026.01.19.1] - 2026-01-19
+### Fixed
+- **Workflow**: Resolved "conda not recognized" errors in GitHub Actions by using `conda.exe` explicitly and setting up the miniconda action.
+### Changed
+- **Python**: Upgraded build environment to Python 3.13.
+
 ## [v2026.01.18.3] - 2026-01-18
 ### Fixed
 - **Instance Detection**: Reverted proxy disabling for Group Plus instances after verifying log compatibility.

@@ -17,10 +17,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Set up Conda
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          python-version: '3.11'
+          auto-update-conda: true
+          python-version: '3.13'
+          activate-environment: base
       
       - name: Run the build script (Windows)
         run: .\build.ps1 -Version ${{ github.ref_name }} -Force

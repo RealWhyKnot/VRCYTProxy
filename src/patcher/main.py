@@ -24,7 +24,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.01.19.dev-main-c794bda"
+    CURRENT_VERSION = "v2026.01.19.dev-main-fb2d4aa"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -353,6 +353,63 @@ def find_latest_log_file():
         return max(list_of_files) if list_of_files else None
     except Exception: return None
 
+uac_requested = False
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def remove_readonly(path):
+    """Recursively remove Read-Only attribute from a file or directory."""
+    if not os.path.exists(path): return
+
+    def make_writable(p):
+        try:
+            import stat
+            current_mode = os.stat(p).st_mode
+            if not (current_mode & stat.S_IWRITE):
+                # logger.debug(f"Removing Read-Only attribute: {p}")
+                os.chmod(p, current_mode | stat.S_IWRITE)
+        except Exception: pass
+
+    if os.path.isfile(path):
+        make_writable(path)
+    else:
+        make_writable(path) # The folder itself
+        for root, dirs, files in os.walk(path):
+            for name in dirs:
+                make_writable(os.path.join(root, name))
+            for name in files:
+                make_writable(os.path.join(root, name))
+
+def fix_permissions(path):
+    global uac_requested
+    
+    if uac_requested:
+        return
+
+    if platform.system() != 'Windows': return
+    
+    if os.path.isfile(path):
+        target_dir = os.path.dirname(path)
+    else:
+        target_dir = path
+        
+    logger.info(f"Requesting Admin privileges to fix permissions (Recursive) on: {target_dir}")
+    
+    # 1. Take Ownership recursively
+    # 2. Grant Full Control to the current user recursively
+    cmd = f'/c takeown /f "{target_dir}" /r /d y && icacls "{target_dir}" /grant "%USERNAME%":F /T /C'
+    
+    try:
+        # 1 = SW_SHOWNORMAL
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", cmd, None, 1)
+        uac_requested = True
+    except Exception as e:
+        logger.error(f"Failed to request admin permissions: {e}")
+
 def retry_operation(func, retries=5, delay=0.5):
     for i in range(retries):
         try:
@@ -508,8 +565,28 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
             logger.error(f"Copy failed. '{WRAPPER_EXE_NAME}' not found after copy.")
             return False, is_waiting_flag
 
-    except PermissionError:
-        logger.warning("Permission denied. VRChat is likely loading/using the file. Retrying next cycle.")
+    except PermissionError as e:
+        logger.warning(f"Permission denied: {e}")
+        
+        # Try to fix read-only issues regardless of error type
+        remove_readonly(TARGET_YTDLP_PATH)
+        remove_readonly(VRCHAT_TOOLS_DIR)
+
+        if getattr(e, 'winerror', None) == 32:
+            logger.warning("The file is currently in use by another program.")
+        elif getattr(e, 'winerror', None) == 5:
+            if not is_admin():
+                if not uac_requested:
+                    logger.warning("Access is denied. Attempting to fix permissions via UAC...")
+                    fix_permissions(VRCHAT_TOOLS_DIR)
+                else:
+                    logger.warning("Access is denied. UAC was already requested this session. Please check folder permissions manually.")
+            else:
+                 logger.error("Access denied even with Admin privileges! Check if the file is locked by another program or if it's marked as Read-Only.")
+        else:
+             logger.warning("The file or folder is currently inaccessible.")
+
+        logger.warning("Retrying next cycle.")
         return False, is_waiting_flag
     except Exception:
         logger.exception("An unexpected error occurred enabling patch.")
@@ -561,6 +638,24 @@ def disable_patch(wrapper_file_list):
                 logger.info("Patch disabled (No files found).")
 
         return True
+    except PermissionError as e:
+        logger.warning(f"Permission denied while disabling patch: {e}")
+        
+        remove_readonly(TARGET_YTDLP_PATH)
+        remove_readonly(VRCHAT_TOOLS_DIR)
+
+        if getattr(e, 'winerror', None) == 32:
+            logger.warning("The file is currently in use by another program.")
+        elif getattr(e, 'winerror', None) == 5:
+            if not is_admin():
+                if not uac_requested:
+                    logger.warning("Access is denied. Attempting to fix permissions via UAC...")
+                    fix_permissions(VRCHAT_TOOLS_DIR)
+                else:
+                    logger.warning("Access is denied. UAC was already requested this session.")
+            else:
+                 logger.error("Access denied even with Admin privileges!")
+        return False
     except Exception:
         logger.exception("Error disabling patch.")
         return False

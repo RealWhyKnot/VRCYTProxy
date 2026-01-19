@@ -1,5 +1,10 @@
 # Changelog
 
+## [v2026.01.19.4] - 2026-01-19
+### Changed
+- **Build**: Made full environment and dependency rebuilds the default behavior (removed `-Force`).
+- **yt-dlp**: Now builds `yt-dlp.exe` directly from the master branch source for every build.
+
 ## [v2026.01.19.3] - 2026-01-19
 ### Added
 - **Automation**: Build script now automatically fetches and downloads the latest `yt-dlp` and `Deno` versions from GitHub.

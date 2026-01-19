@@ -1,6 +1,5 @@
 param(
-    [string]$Version, 
-    [switch]$Force
+    [string]$Version
 )
 
 $PSScriptRoot = $PSCommandPath | Split-Path
@@ -71,41 +70,15 @@ try {
         Write-Host "Created vendor directory."
     }
     
-    $PinnedVersions = $null
-    if (Test-Path $VersionFilePath) { 
-        try { 
-            $PinnedVersions = Get-Content $VersionFilePath | ConvertFrom-Json 
-            Write-Host "Loaded versions from vendor_versions.json: $($PinnedVersions | ConvertTo-Json -Compress)"
-        } catch {
-            Write-Host "Warning: vendor_versions.json exists but could not be parsed." -ForegroundColor Yellow
-        } 
-    }
+    Write-Host "Fetching latest Deno version..."
+    $Headers = @{ "Accept" = "application/vnd.github.v3+json" }
+    $DenoVer = (Invoke-RestMethod "https://api.github.com/repos/denoland/deno/releases/latest" -Headers $Headers).tag_name
     
-    if ($Force -or -not (Test-Path $DenoPath) -or -not (Test-Path $YtdlpPath)) {
-        Write-Host "Checking for latest dependency versions..."
-        $Headers = @{ "Accept" = "application/vnd.github.v3+json" }
-        
-        # Always fetch latest from GitHub unless Force is NOT set AND we have local files
-        $DenoVer = (Invoke-RestMethod "https://api.github.com/repos/denoland/deno/releases/latest" -Headers $Headers).tag_name
-        $YtdlpVer = (Invoke-RestMethod "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" -Headers $Headers).tag_name
-        
-        if ($Force -or -not (Test-Path $DenoPath) -or ($PinnedVersions.deno -ne $DenoVer)) {
-            Write-Host "Downloading Deno $DenoVer..." -ForegroundColor Cyan
-            Invoke-WebRequest "https://github.com/denoland/deno/releases/download/$DenoVer/deno-x86_64-pc-windows-msvc.zip" -OutFile (Join-Path $VendorDir "deno.zip")
-            Expand-Archive (Join-Path $VendorDir "deno.zip") -DestinationPath $VendorDir -Force
-            Remove-Item (Join-Path $VendorDir "deno.zip")
-            Write-Host "Deno downloaded."
-        }
-        
-        if ($Force -or -not (Test-Path $YtdlpPath) -or ($PinnedVersions.ytdlp -ne $YtdlpVer)) {
-            Write-Host "Downloading yt-dlp $YtdlpVer..." -ForegroundColor Cyan
-            Invoke-WebRequest "https://github.com/yt-dlp/yt-dlp/releases/download/$YtdlpVer/yt-dlp.exe" -OutFile $YtdlpPath
-            Write-Host "yt-dlp downloaded."
-        }
-        
-        @{ deno = $DenoVer; ytdlp = $YtdlpVer } | ConvertTo-Json | Out-File $VersionFilePath
-        Write-Host "Updated vendor_versions.json"
-    }
+    Write-Host "Downloading Deno $DenoVer..." -ForegroundColor Cyan
+    Invoke-WebRequest "https://github.com/denoland/deno/releases/download/$DenoVer/deno-x86_64-pc-windows-msvc.zip" -OutFile (Join-Path $VendorDir "deno.zip")
+    Expand-Archive (Join-Path $VendorDir "deno.zip") -DestinationPath $VendorDir -Force
+    Remove-Item (Join-Path $VendorDir "deno.zip")
+    Write-Host "Deno updated."
 
     Write-Host "[1/6] Setting up fresh Conda environment..." -ForegroundColor Green
     $CondaEnvName = "VRCYTProxy_Build"
@@ -146,6 +119,9 @@ try {
     Write-Host "Updating pip..."
     & $VenvPython -m pip install --upgrade pip --quiet
     
+    Write-Host "Installing yt-dlp from master source..." -ForegroundColor Cyan
+    & $VenvPython -m pip install https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz --quiet
+
     Write-Host "Installing PyInstaller from source (this may take a few minutes)..." -ForegroundColor Yellow
     # Using --progress-bar on and direct execution to avoid conda run hangs
     & $VenvPip install --force-reinstall --no-binary pyinstaller pyinstaller --progress-bar on
@@ -166,6 +142,16 @@ try {
     
     Write-Host "[4/6] Building executables..." -ForegroundColor Green
 
+    Write-Host "   -> Building yt-dlp (Latest Master)..." -ForegroundColor Cyan
+    $YtDlpBuildArgs = @(
+        "--noconfirm",
+        "--onefile",
+        "--name", "yt-dlp-latest",
+        "--distpath", $VendorDir
+    )
+    # Build yt-dlp using its internal entry point
+    & conda run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp "yt_dlp.__main__"
+    
     Write-Host "   -> Building Redirector..." -ForegroundColor Cyan
     
     $RedirectorArgs = @(

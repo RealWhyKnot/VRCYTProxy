@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2026.01.19.5] - 2026-01-19
+### Added
+- **Smart Updates**: Dependency downloads and yt-dlp master builds are now skipped if the remote version matches the local cache (unless `-Force` is used).
+
 ## [v2026.01.19.4] - 2026-01-19
 ### Changed
 - **Build**: Made full environment and dependency rebuilds the default behavior (removed `-Force`).

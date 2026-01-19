@@ -154,7 +154,13 @@ logger = setup_logging()
 
 def load_config(config_path):
     defaults = {
-        "video_error_patterns": ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error", "[VideoTXL]"],
+        "video_error_patterns": [
+            "[Video Player] Failed to load", 
+            "VideoError", 
+            "[AVProVideo] Error", 
+            "[VideoTXL] Error", 
+            "Loading failed"
+        ],
         "instance_patterns": {
             "invite": "~private",
             "friends+": "~hidden",
@@ -228,34 +234,48 @@ SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
 REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
 WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
 
-def update_wrapper_state(is_broken=False, duration=None):
+def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
     try:
-        state = {'consecutive_errors': 0}
+        state = {'consecutive_errors': 0, 'failed_urls': {}}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
             except Exception: pass
         
+        if 'failed_urls' not in state: state['failed_urls'] = {}
+
         if is_broken:
             count = state.get('consecutive_errors', 0) + 1
             state['consecutive_errors'] = count
-            state['force_fallback'] = True
             
-            if duration:
-                wait_time = duration
+            if failed_url:
+                # Store the URL and when it failed. We block it for a while.
+                state['failed_urls'][failed_url] = {
+                    'expiry': time.time() + 300, # Block this specific URL for 5 mins
+                    'tier': 1 # We'll implement tier escalation in wrapper
+                }
+                logger.warning(f"URL Failed: {failed_url}. Force bypassing proxy for this URL for 5m.")
             else:
-                if count <= 1: wait_time = 60 # Transient
-                elif count == 2: wait_time = 300 # Standard
-                elif count == 3: wait_time = 900 # Extended
-                else: wait_time = 3600 # Max
-                
-            state['fallback_until'] = time.time() + wait_time
-            logger.warning(f"Proxy Error #{count}. Falling back for {wait_time}s (until {time.ctime(state['fallback_until'])})")
+                state['force_fallback'] = True
+                if duration:
+                    wait_time = duration
+                else:
+                    if count <= 1: wait_time = 60 # Transient
+                    elif count == 2: wait_time = 300 # Standard
+                    elif count == 3: wait_time = 900 # Extended
+                    else: wait_time = 3600 # Max
+                state['fallback_until'] = time.time() + wait_time
+                logger.warning(f"Proxy Error #{count}. Falling back for {wait_time}s (until {time.ctime(state['fallback_until'])})")
         else:
             state['consecutive_errors'] = 0
             state['force_fallback'] = False
+            # We don't necessarily clear failed_urls here as they are per-URL
         
+        # Cleanup expired failed_urls
+        now = time.time()
+        state['failed_urls'] = {u: d for u, d in state.get('failed_urls', {}).items() if d.get('expiry', 0) > now}
+
         with open(WRAPPER_STATE_PATH, 'w') as f:
             json.dump(state, f)
     except Exception as e:
@@ -616,6 +636,7 @@ class LogMonitor:
         self.last_instance_type = "private"
         self.proxy_domain = CONFIG.get("proxy_domain", "whyknot.dev")
         self.error_patterns = CONFIG.get("video_error_patterns", [])
+        self.last_attempted_url = None
 
     def update_log_file(self, path):
         if path != self.current_log:
@@ -641,10 +662,32 @@ class LogMonitor:
                     if new_lines:
                         self.last_pos = f.tell()
                         for line in new_lines:
+                            # 1. Catch URL Loading attempts to track what might fail
+                            # Pattern: [AVProVideo] Opening https://... (offset 0) ...
+                            if "[AVProVideo] Opening" in line:
+                                url_match = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
+                                if url_match:
+                                    self.last_attempted_url = url_match.group(1).strip()
+                                    logger.debug(f"Detected video load attempt: {self.last_attempted_url}")
+
+                            # 2. Catch Errors
                             if any(x in line for x in self.error_patterns):
-                                if self.proxy_domain in line:
+                                if self.last_attempted_url and self.proxy_domain in self.last_attempted_url:
                                     logger.warning(f"Detected Proxy Video Error: {line.strip()}")
-                                    update_wrapper_state(is_broken=True)
+                                    # Extract the original URL from the proxy URL if possible
+                                    # Format: https://whyknot.dev/stream?url=ENCODED_URL
+                                    original_url = None
+                                    if "url=" in self.last_attempted_url:
+                                        try:
+                                            import urllib.parse
+                                            parsed = urllib.parse.urlparse(self.last_attempted_url)
+                                            qs = urllib.parse.parse_qs(parsed.query)
+                                            if 'url' in qs:
+                                                original_url = qs['url'][0]
+                                        except Exception: pass
+                                    
+                                    target_to_block = original_url if original_url else self.last_attempted_url
+                                    update_wrapper_state(is_broken=True, failed_url=target_to_block)
                                 else:
                                     logger.info(f"Detected Non-Proxy Video Error: {line.strip()}")
 

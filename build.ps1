@@ -89,20 +89,32 @@ try {
         Write-Host "Updated vendor_versions.json"
     }
 
-    Write-Host "[1/6] Setting up Python environment..." -ForegroundColor Green
-    if (-not (Test-Path $VenvDir)) { 
-        Write-Host "Creating virtual environment..."
-        & $PythonExe -m venv $VenvDir 
+    Write-Host "[1/6] Setting up Conda environment..." -ForegroundColor Green
+    $CondaEnvName = "VRCYTProxy_Build"
+    
+    # Check if conda environment exists
+    $CondaEnvs = & conda env list | Out-String
+    if ($CondaEnvs -notmatch $CondaEnvName) {
+        Write-Host "Creating Conda environment '$CondaEnvName'..."
+        & conda create -n $CondaEnvName python=3.10 -y
+    } else {
+        Write-Host "Conda environment '$CondaEnvName' already exists."
     }
-    $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-    $VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
-    $VenvPyInstaller = Join-Path $VenvDir "Scripts\pyinstaller.exe"
-    Write-Host "Virtual Env: $VenvDir"
 
-    Write-Host "[2/6] Installing/Updating dependencies..." -ForegroundColor Green
-    $env:PYINSTALLER_COMPILE_BOOTLOADER = "1"
-    & $VenvPython -m pip install --upgrade pip
-    & $VenvPip install --force-reinstall --no-cache-dir pyinstaller
+    # Get paths from conda
+    $EnvInfo = & conda run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
+    $EnvInfoLines = $EnvInfo -split "`r`n"
+    $VenvPython = $EnvInfoLines[0].Trim()
+    $VenvScripts = $EnvInfoLines[1].Trim()
+    
+    $VenvPip = Join-Path $VenvScripts "pip.exe"
+    $VenvPyInstaller = Join-Path $VenvScripts "pyinstaller.exe"
+    
+    Write-Host "Conda Python: $VenvPython"
+
+    Write-Host "[2/6] Installing/Updating dependencies in Conda..." -ForegroundColor Green
+    & conda run -n $CondaEnvName pip install --upgrade pip
+    & conda run -n $CondaEnvName pip install pyinstaller
     Write-Host "Dependencies installed."
 
     Write-Host "[3/6] Cleaning directories..." -ForegroundColor Green
@@ -132,7 +144,7 @@ try {
     if ($IconArg) { $RedirectorArgs += "--icon", $IconPath }
     $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
 
-    & $VenvPyInstaller @RedirectorArgs
+    & conda run -n $CondaEnvName pyinstaller @RedirectorArgs
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
@@ -163,7 +175,7 @@ try {
     if ($IconArg) { $PatcherArgs += "--icon", $IconPath }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
-    & $VenvPyInstaller @PatcherArgs
+    & conda run -n $CondaEnvName pyinstaller @PatcherArgs
         
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 

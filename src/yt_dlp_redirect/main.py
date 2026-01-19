@@ -171,17 +171,33 @@ def attempt_executable(executable_path, executable_name, incoming_args, use_cust
 
 def process_and_execute(incoming_args):
     proxy_disabled = False
+    forced_tier = 0 # 0 = Normal, 1 = Skip Tier 1, 2 = Skip Tier 1&2
     
+    target_url = find_url_in_args(incoming_args)
+    logger.info(f"URL found in arguments: {target_url}")
+
     # Check for fallback state
     if os.path.exists(WRAPPER_STATE_PATH):
         try:
             with open(WRAPPER_STATE_PATH, 'r') as f:
                 state = json.load(f)
+                
+                # Global fallback
                 if state.get('force_fallback', False):
                     fallback_until = state.get('fallback_until', 0)
                     if time.time() < fallback_until:
-                        logger.warning(f"Fallback mode active (Expires: {time.ctime(fallback_until)}). Disabling Tier 1 (Proxy).")
+                        logger.warning(f"Global Fallback mode active. Disabling Tier 1 (Proxy).")
                         proxy_disabled = True
+                
+                # Per-URL fallback/escalation
+                if target_url and 'failed_urls' in state:
+                    failed_info = state['failed_urls'].get(target_url)
+                    if failed_info and time.time() < failed_info.get('expiry', 0):
+                        failed_tier = failed_info.get('tier', 0)
+                        forced_tier = failed_tier + 1
+                        logger.warning(f"URL previously failed at Tier {failed_tier}. Escalating to Tier {forced_tier}.")
+                        if forced_tier >= 1: proxy_disabled = True
+
         except Exception as e:
             logger.error(f"Failed to read wrapper state: {e}")
 
@@ -191,9 +207,6 @@ def process_and_execute(incoming_args):
             logger.warning("Proxy is offline or unreachable. Disabling Tier 1 (Proxy).")
             proxy_disabled = True
 
-    target_url = find_url_in_args(incoming_args)
-    logger.info(f"URL found in arguments: {target_url}")
-
     if not target_url:
         logger.warning("No URL found in arguments. Passing to VRChat's yt-dlp as a fallback.")
         final_output, return_code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args)
@@ -202,61 +215,79 @@ def process_and_execute(incoming_args):
         return return_code
 
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
-    is_youtube_url = target_url and not is_already_proxied and re.search(r'youtube\.com|youtu\.be', target_url)
     
-    logger.info(f"Analysis: Is YouTube? {bool(is_youtube_url)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}")
+    # Expand proxied domains: YouTube, Twitch, VRCDN
+    proxy_patterns = r'youtube\.com|youtu\.be|twitch\.tv|vrcdn\.live|vrcdn\.video'
+    should_proxy = target_url and not is_already_proxied and re.search(proxy_patterns, target_url, re.IGNORECASE)
+    
+    logger.info(f"Analysis: Should Proxy? {bool(should_proxy)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}. Forced Tier: {forced_tier}")
 
-    if is_youtube_url and not proxy_disabled:
-        logger.info("Tier 1: YouTube URL detected. Returning proxied URL directly.")
-        encoded_youtube_url = quote_plus(target_url)
-        new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_youtube_url}"
+    if should_proxy and not proxy_disabled and forced_tier < 1:
+        logger.info(f"Tier 1: Proxyable URL detected ({target_url}). Returning proxied URL directly.")
+        encoded_url = quote_plus(target_url)
+        new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
         
         logger.info(f"Rewriting URL to: {new_url}")
         update_wrapper_success()
         safe_print(new_url)
-        logger.info(f"Successfully sent final URL to VRChat: {new_url}")
         return 0 
 
-    if is_already_proxied and not proxy_disabled:
+    if is_already_proxied and not proxy_disabled and forced_tier < 1:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
         update_wrapper_success()
         safe_print(target_url) 
-        logger.info(f"Successfully sent final URL to VRChat: {target_url}")
         return 0
     
-    logger.info("Tier 2: Non-YouTube URL (or Proxy Disabled). Attempting to resolve with yt-dlp-latest.exe...")
-    
-    tier_2_args = []
-    skip_next = False
-    for arg in incoming_args:
-        if skip_next:
-            skip_next = False
-            continue
+    if forced_tier <= 1:
+        logger.info("Tier 2: Attempting to resolve with yt-dlp-latest.exe...")
         
-        if arg in ("--exp-allow", "--wild-allow"):
-            logger.warning(f"Removing unsupported VRChat argument: {arg}")
-            skip_next = True 
-            continue
+        tier_2_args = []
+        skip_next = False
+        for arg in incoming_args:
+            if skip_next:
+                skip_next = False
+                continue
             
-        tier_2_args.append(arg)
+            if arg in ("--exp-allow", "--wild-allow"):
+                logger.warning(f"Removing unsupported VRChat argument: {arg}")
+                skip_next = True 
+                continue
+                
+            tier_2_args.append(arg)
 
-    js_runtime_arg = f"deno:{DENO_PATH}"
-    tier_2_args.extend(["--js-runtimes", js_runtime_arg])
-    logger.info(f"Adding JS runtime argument: --js-runtimes {js_runtime_arg}")
+        js_runtime_arg = f"deno:{DENO_PATH}"
+        tier_2_args.extend(["--js-runtimes", js_runtime_arg])
 
-    resolved_url, return_code = attempt_executable(
-        LATEST_YTDLP_PATH, 
-        LATEST_YTDLP_FILENAME, 
-        tier_2_args, 
-        use_custom_temp_dir=True 
-    )
-    
-    if return_code == 0 and resolved_url and resolved_url.startswith('http'):
-        logger.info(f"Tier 2 success. Returning URL: {resolved_url}")
-        safe_print(resolved_url)
-        return 0
-    else:
-        logger.warning(f"Tier 2 failed (Code: {return_code}) or returned invalid URL. Output: {resolved_url}")
+        resolved_url, return_code = attempt_executable(
+            LATEST_YTDLP_PATH, 
+            LATEST_YTDLP_FILENAME, 
+            tier_2_args, 
+            use_custom_temp_dir=True 
+        )
+        
+        if return_code == 0 and resolved_url and resolved_url.startswith('http'):
+            logger.info(f"Tier 2 success. Returning URL: {resolved_url}")
+            safe_print(resolved_url)
+            return 0
+        else:
+            logger.warning(f"Tier 2 failed (Code: {return_code}) or returned invalid URL. Output: {resolved_url}")
+            # If we were at Tier 2 and it failed, and we have a target URL, we should tell the patcher
+            if target_url:
+                # We need a way to communicate Tier 2 failure back to the patcher so it can escalate to Tier 3
+                # For now, if the wrapper is running, it can't easily update the patcher's internal state
+                # but it CAN update wrapper_state.json
+                try:
+                    if os.path.exists(WRAPPER_STATE_PATH):
+                        with open(WRAPPER_STATE_PATH, 'r') as f:
+                            state = json.load(f)
+                        if 'failed_urls' not in state: state['failed_urls'] = {}
+                        state['failed_urls'][target_url] = {
+                            'expiry': time.time() + 300,
+                            'tier': 2 # Mark that Tier 2 failed
+                        }
+                        with open(WRAPPER_STATE_PATH, 'w') as f:
+                            json.dump(state, f)
+                except Exception: pass
 
     logger.info("Tier 3: Falling back to VRChat's yt-dlp-og.exe...")
     final_output, return_code = attempt_executable(
@@ -265,12 +296,25 @@ def process_and_execute(incoming_args):
         incoming_args 
     )
     
-    if final_output:
+    if return_code == 0 and final_output:
         logger.info(f"Tier 3 finished. Returning output to VRChat: {final_output}")
         safe_print(final_output)
+        return 0
     else:
-        logger.error(f"Tier 3 finished (Code: {return_code}) but produced no output.")
-        sys.stderr.write(f"Wrapper Error: Tier 3 failed. Check {LOG_FILE_NAME}\n")
+        logger.warning(f"Tier 3 failed (Code: {return_code}) or produced no output.")
+        
+        # FINAL LAST RESORT: Try Tier 1 (Proxy) even if we normally wouldn't, 
+        # as long as it's not already a proxy URL and proxy isn't globally dead.
+        if not is_already_proxied and not proxy_disabled and target_url:
+            logger.info("CRITICAL FALLBACK: Tier 3 failed. Attempting Tier 1 (Proxy) as absolute last resort.")
+            encoded_url = quote_plus(target_url)
+            new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
+            logger.info(f"Last resort rewrite: {new_url}")
+            safe_print(new_url)
+            return 0
+
+        logger.error(f"All tiers failed for URL: {target_url}")
+        sys.stderr.write(f"Wrapper Error: All tiers failed. Check {LOG_FILE_NAME}\n")
 
     return return_code
 

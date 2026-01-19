@@ -1,5 +1,14 @@
 # Changelog
 
+## [v2026.01.18.0] - 2026-01-18
+### Added
+- **Intelligent Fallback**: Per-URL error tracking with tier escalation (Proxy -> Tier 2 -> Tier 3).
+- **Last-Resort Proxy**: Final attempt at Tier 1 (Proxy) if Tier 3 fails, even for non-standard URLs.
+- **Expanded Support**: Added Twitch and VRCDN to proxied domains.
+- **Conda Build**: Migrated build system to use Conda for better environment stability.
+### Improved
+- **Error Detection**: High-precision URL capture from `[AVProVideo]` log entries for accurate failure attribution.
+
 ## [v2025.12.30.0] - 2025-12-30
 ### Fixed
 - **OS Error 22 (Invalid Argument)**: Resolved a crash in the redirector caused by `print` calls failing when VRChat closed its output pipe prematurely. All communication with VRChat is now wrapped in safety checks.

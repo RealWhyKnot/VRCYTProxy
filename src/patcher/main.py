@@ -24,7 +24,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.01.18.dev-main-58253ef"
+    CURRENT_VERSION = "v2026.01.18.dev-main-7824482"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -605,12 +605,14 @@ class LogMonitor:
         self.proxy_domain = CONFIG.get("proxy_domain", "whyknot.dev")
         self.error_patterns = CONFIG.get("video_error_patterns", [])
         self.last_attempted_url = None
+        self.is_initial_scan = False
 
     def update_log_file(self, path):
         if path != self.current_log:
             self.current_log = path
             self.last_pos = 0
-            logger.info(f"Monitoring Log: {os.path.basename(path)}")
+            self.is_initial_scan = True
+            logger.info(f"Monitoring Log: {os.path.basename(path)} (Initial Catch-up)")
             try:
                 file_size = os.path.getsize(path)
                 self.last_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
@@ -628,41 +630,53 @@ class LogMonitor:
                     f.seek(self.last_pos)
                     new_lines = f.readlines()
                     if new_lines:
+                        # If we just read a bunch of lines, and we haven't reached the current 
+                        # 'end' that existed when tick started, we are still catching up.
+                        # However, f.tell() will likely be close to current_size.
+                        
                         self.last_pos = f.tell()
                         for line in new_lines:
                             # 1. Catch URL Loading attempts to track what might fail
-                            # Pattern: [AVProVideo] Opening https://... (offset 0) ...
                             if "[AVProVideo] Opening" in line:
                                 url_match = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
                                 if url_match:
                                     self.last_attempted_url = url_match.group(1).strip()
-                                    logger.debug(f"Detected video load attempt: {self.last_attempted_url}")
+                                    if not self.is_initial_scan:
+                                        logger.debug(f"Detected video load attempt: {self.last_attempted_url}")
 
-                            # 2. Catch Errors
+                            # 2. Catch Errors (ONLY if not in initial scan)
                             if any(x in line for x in self.error_patterns):
-                                if self.last_attempted_url and self.proxy_domain in self.last_attempted_url:
-                                    logger.warning(f"Detected Proxy Video Error: {line.strip()}")
-                                    # Extract the original URL from the proxy URL if possible
-                                    # Format: https://whyknot.dev/stream?url=ENCODED_URL
-                                    original_url = None
-                                    if "url=" in self.last_attempted_url:
-                                        try:
-                                            import urllib.parse
-                                            parsed = urllib.parse.urlparse(self.last_attempted_url)
-                                            qs = urllib.parse.parse_qs(parsed.query)
-                                            if 'url' in qs:
-                                                original_url = qs['url'][0]
-                                        except Exception: pass
-                                    
-                                    target_to_block = original_url if original_url else self.last_attempted_url
-                                    update_wrapper_state(is_broken=True, failed_url=target_to_block)
+                                if not self.is_initial_scan:
+                                    if self.last_attempted_url and self.proxy_domain in self.last_attempted_url:
+                                        logger.warning(f"Detected Proxy Video Error: {line.strip()}")
+                                        original_url = None
+                                        if "url=" in self.last_attempted_url:
+                                            try:
+                                                import urllib.parse
+                                                parsed = urllib.parse.urlparse(self.last_attempted_url)
+                                                qs = urllib.parse.parse_qs(parsed.query)
+                                                if 'url' in qs:
+                                                    original_url = qs['url'][0]
+                                            except Exception: pass
+                                        
+                                        target_to_block = original_url if original_url else self.last_attempted_url
+                                        update_wrapper_state(is_broken=True, failed_url=target_to_block)
+                                    else:
+                                        logger.info(f"Detected Non-Proxy Video Error: {line.strip()}")
                                 else:
-                                    logger.info(f"Detected Non-Proxy Video Error: {line.strip()}")
+                                    # Just log internally that we found an old error but are skipping it
+                                    pass
 
                             it = parse_instance_type_from_line(line)
                             if it and it != self.last_instance_type:
                                 logger.info(f"Instance changed: {self.last_instance_type} -> {it}")
                                 self.last_instance_type = it
+
+                        # After the first batch of lines is processed, we are no longer in initial scan
+                        if self.is_initial_scan:
+                            self.is_initial_scan = False
+                            logger.info(f"Log catch-up complete. Live monitoring enabled.")
+
         except Exception: pass
 
 def log_monitor_thread_func(monitor, stop_event):

@@ -1,6 +1,11 @@
 # Changelog
 
-## [v2026.01.18.0] - 2026-01-18
+## [v2026.01.18.3] - 2026-01-18
+### Fixed
+- **Instance Detection**: Reverted proxy disabling for Group Plus instances after verifying log compatibility.
+
+## [v2026.01.18.2] - 2026-01-18
+
 ### Added
 - **Intelligent Fallback**: Per-URL error tracking with tier escalation (Proxy -> Tier 2 -> Tier 3).
 - **Last-Resort Proxy**: Final attempt at Tier 1 (Proxy) if Tier 3 fails, even for non-standard URLs.

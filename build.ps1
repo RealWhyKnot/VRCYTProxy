@@ -109,8 +109,9 @@ try {
     $CondaEnvName = "VRCYTProxy_Build"
     $IsCI = $env:GITHUB_ACTIONS -eq "true"
 
-    # Use conda.exe in CI for better path resolution
-    $CondaCmd = if ($IsCI) { "conda.exe" } else { "conda" }
+    # Use absolute path for conda in CI to ensure recognition
+    $CondaCmd = if ($IsCI) { Join-Path $env:CONDA "Scripts\conda.exe" } else { "conda" }
+    Write-Host "Using Conda command: $CondaCmd"
 
     $EnvList = & $CondaCmd env list
     $EnvExists = $EnvList -match "\b$CondaEnvName\b"
@@ -289,6 +290,7 @@ try {
 catch {
     Write-Host "BUILD FAILED: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "Stack Trace: $($_.ScriptStackTrace)" -ForegroundColor Red
+    exit 1
 }
 finally {
     Stop-Transcript

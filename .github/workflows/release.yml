@@ -22,7 +22,7 @@ jobs:
         with:
           auto-update-conda: true
           python-version: '3.13'
-          activate-environment: base
+          auto-activate-base: true
       
       - name: Run the build script (Windows)
         run: .\build.ps1 -Version ${{ github.ref_name }} -Force

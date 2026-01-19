@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2026.01.19.2] - 2026-01-19
+### Fixed
+- **Workflow**: Resolved `CondaValueError` regarding reserved 'base' name by using `auto-activate-base: true`.
+
 ## [v2026.01.19.1] - 2026-01-19
 ### Fixed
 - **Workflow**: Resolved "conda not recognized" errors in GitHub Actions by using `conda.exe` explicitly and setting up the miniconda action.

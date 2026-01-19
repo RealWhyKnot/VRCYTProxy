@@ -1,5 +1,11 @@
 # Changelog
 
+## [v2026.01.19.6] - 2026-01-19
+### Fixed
+- **Workflow**: Added `GITHUB_TOKEN` authentication to resolve 403 Forbidden errors when fetching metadata.
+- **Workflow**: Resolved build hangs by removing interactive prompts.
+- **Workflow**: Improved Conda reliability by using `conda.exe` explicitly in CI.
+
 ## [v2026.01.19.5] - 2026-01-19
 ### Added
 - **Smart Updates**: Dependency downloads and yt-dlp master builds are now skipped if the remote version matches the local cache (unless `-Force` is used).

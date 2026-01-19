@@ -22,11 +22,14 @@ jobs:
         with:
           auto-update-conda: true
           python-version: '3.13'
-          auto-activate-base: true
+          activate-environment: VRCYTProxy_Build
+          use-only-tar-bz2: true # Important for caching performance
       
       - name: Run the build script (Windows)
         run: .\build.ps1 -Version ${{ github.ref_name }}
         shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Prepare Release Archive (Windows)
         run: |

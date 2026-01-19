@@ -81,6 +81,10 @@ try {
 
     Write-Host "Fetching latest metadata from GitHub..."
     $Headers = @{ "Accept" = "application/vnd.github.v3+json" }
+    if ($env:GITHUB_TOKEN) {
+        Write-Host "Using GITHUB_TOKEN for authentication."
+        $Headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)"
+    }
     
     # 1. Check Deno (Release Tag)
     $LatestDenoVer = (Invoke-RestMethod "https://api.github.com/repos/denoland/deno/releases/latest" -Headers $Headers).tag_name
@@ -103,16 +107,29 @@ try {
 
     Write-Host "[1/6] Setting up fresh Conda environment..." -ForegroundColor Green
     $CondaEnvName = "VRCYTProxy_Build"
-    
-    # Force wipe existing environment
-    Write-Host "Wiping existing Conda environment '$CondaEnvName'..."
-    & conda remove -n $CondaEnvName --all -y 2>$null
-    
-    Write-Host "Creating fresh Conda environment '$CondaEnvName'..."
-    & conda create -n $CondaEnvName python=3.13 -y
+    $IsCI = $env:GITHUB_ACTIONS -eq "true"
 
-    # Get paths from conda
-    $EnvInfo = & conda run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
+    # Smart environment management - use conda.exe for explicit pathing in CI if needed
+    $CondaCmd = if ($IsCI) { "conda.exe" } else { "conda" }
+    
+    $EnvList = & $CondaCmd env list
+    $EnvExists = $EnvList -match "\b$CondaEnvName\b"
+
+    if ($Force -and $EnvExists) {
+        Write-Host "Force rebuild requested. Wiping existing environment '$CondaEnvName'..."
+        & $CondaCmd remove -n $CondaEnvName --all -y
+        $EnvExists = $false
+    }
+
+    if (-not $EnvExists) {
+        Write-Host "Creating fresh Conda environment '$CondaEnvName'..."
+        & $CondaCmd create -n $CondaEnvName python=3.13 -y
+    } else {
+        Write-Host "Using existing Conda environment '$CondaEnvName'."
+    }
+
+    # Get paths from conda (works in both local and CI)
+    $EnvInfo = & $CondaCmd run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
     $EnvInfoLines = $EnvInfo -split "`r`n"
     $VenvPython = $EnvInfoLines[0].Trim()
     $VenvScripts = $EnvInfoLines[1].Trim()
@@ -160,19 +177,38 @@ try {
     
     Write-Host "[4/6] Building executables..." -ForegroundColor Green
 
-    if ($NeedsYtdlp) {
-        Write-Host "   -> Building yt-dlp (Latest Master: $($LatestYtdlpHash.Substring(0,7)))..." -ForegroundColor Cyan
-        & $VenvPython -m pip install https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz --quiet
-        
-        $YtDlpBuildArgs = @(
-            "--noconfirm",
-            "--onefile",
-            "--name", "yt-dlp-latest",
-            "--distpath", $VendorDir
-        )
-        & conda run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp "yt_dlp.__main__"
-        Write-Host "   -> yt-dlp build complete."
-    } else {
+        if ($NeedsYtdlp) {
+
+            Write-Host "   -> Building yt-dlp (Latest Master: $($LatestYtdlpHash.Substring(0,7)))..." -ForegroundColor Cyan
+
+            & $VenvPython -m pip install https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz --quiet
+
+            
+
+            $YtDlpBuildArgs = @(
+
+                "--noconfirm",
+
+                "--onefile",
+
+                "--name", "yt-dlp-latest",
+
+                "--distpath", $VendorDir
+
+            )
+
+                    # Build yt-dlp using its internal entry point
+                    $YtMain = & $VenvPython -c "import yt_dlp, os; print(os.path.join(os.path.dirname(yt_dlp.__file__), '__main__.py'))"
+                    Write-Host "   -> Entry Point: $YtMain"
+                        & $CondaCmd run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp --hidden-import "yt_dlp.utils._utils" --hidden-import "yt_dlp.extractor.lazy_extractors" $YtMain
+
+                    Write-Host "   -> yt-dlp build complete."
+
+            
+
+        }
+
+     else {
         Write-Host "   -> yt-dlp is up to date. Using existing binary." -ForegroundColor Gray
     }
 
@@ -192,7 +228,7 @@ try {
     if ($IconArg) { $RedirectorArgs += "--icon", $IconPath }
     $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
 
-    & conda run -n $CondaEnvName pyinstaller @RedirectorArgs
+        & $CondaCmd run -n $CondaEnvName pyinstaller @RedirectorArgs
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
@@ -220,7 +256,7 @@ try {
     if ($IconArg) { $PatcherArgs += "--icon", $IconPath }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
-    & conda run -n $CondaEnvName pyinstaller @PatcherArgs
+        & $CondaCmd run -n $CondaEnvName pyinstaller @PatcherArgs
         
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 
@@ -260,9 +296,4 @@ finally {
     Stop-Transcript
     $VersionFile = Join-Path $SrcPatcherDir "_version.py"
     if (Test-Path $VersionFile) { Remove-Item $VersionFile }
-
-    if (-not $BuildSucceeded) {
-        Write-Host "Press any key to exit..."
-        $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") | Out-Null
-    }
 }

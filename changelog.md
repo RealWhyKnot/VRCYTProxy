@@ -1,5 +1,9 @@
 # Changelog
 
+## [v2026.01.19.9] - 2026-01-19
+### Changed
+- **Documentation**: Comprehensive refresh of `README.md` to match the latest server features and world detection logic.
+
 ## [v2026.01.19.8] - 2026-01-19
 ### Fixed
 - **Build**: Fixed absolute path resolution for `conda.exe` in GitHub Actions.

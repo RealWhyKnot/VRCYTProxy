@@ -1,96 +1,67 @@
-# VRCYTProxy - VRChat YouTube URL Patcher
+# VRCYTProxy - VRChat YouTube & Stream Patcher
 
-VRCYTProxy is a tool designed to work around issues with playing YouTube and other videos in VRChat. It works by dynamically patching VRChat's `yt-dlp.exe` to use a more robust, multi-step process for resolving video URLs.
+VRCYTProxy is a tool designed to resolve playback issues with YouTube and other video platforms in VRChat. It dynamically patches VRChat's `yt-dlp.exe` to use a robust, multi-step resolution process while ensuring compliance with VRChat's security model.
 
 ## The Problem
 
-VRChat uses a tool called `yt-dlp.exe` to get the direct video stream URL from a link. This process can fail for two main reasons:
+VRChat relies on a bundled `yt-dlp.exe` to extract direct video stream URLs. This frequently fails because:
 
-1.  **YouTube Blocks:** VRChat's bundled `yt-dlp` is often outdated, and YouTube's frequent changes can break it, causing videos to fail.
-2.  **Other Hosts:** Many other video hosts (like Dailymotion, Vimeo, etc.) may fail to resolve because VRChat's `yt-dlp` is too old to support them.
+1.  **Platform Changes:** YouTube and other sites constantly update their APIs and anti-bot measures, breaking older versions of `yt-dlp`.
+2.  **Protocol Support:** VRChat's internal player often lacks support for modern HLS/DASH manifest handling required by many sites today.
 
-This patcher provides a solution for both of these issues while respecting VRChat's security model.
+VRCYTProxy fixes these issues by introducing a high-performance proxy and a smart fallback chain.
 
 ## How It Works
 
 This project consists of two main components:
 
-1.  **The Patcher (`patcher.exe`)**: This is a smart patcher that you run in the background. It constantly monitors your VRChat log files to see what kind of instance you are in.
+1.  **The Patcher (`patcher.exe`)**: A background service that monitors VRChat logs to detect your current world instance type.
 
-      * **Private Worlds**: When you are in a private world (your own, a friend's, etc.), the patcher automatically replaces VRChat's `yt-dlp.exe` with our custom redirector.
-      * **Public Worlds**: When you join a public or group world, the patcher automatically restores the original `yt-dlp.exe`. This is done to ensure compliance with VRChat's security model.
+      * **Private/Friends/Group Instances**: The patcher automatically replaces VRChat's `yt-dlp.exe` with our custom redirector. This includes `Invite`, `Friends`, `Friends+`, `Group`, and `Group Plus` worlds.
+      * **Public Worlds**: When you join a `Public` or `Group Public` instance, the patcher automatically restores the original `yt-dlp.exe` to ensure full compliance with VRChat's security guidelines.
 
-2.  **The Redirector (`yt-dlp-wrapper.exe`)**: This is the custom executable that gets renamed to `yt-dlp.exe`. When VRChat calls it to resolve a URL, it operates on a 3-tier fallback system:
+2.  **The Redirector (`yt-dlp-wrapper.exe`)**: This component acts as a drop-in replacement for `yt-dlp.exe`. When VRChat requests a URL, it uses a 3-tier system:
 
-      * **Tier 1 (Proxy - Fast Path):** If the link is a **YouTube URL**, it is *immediately* rewritten to use the `https://proxy.whyknot.dev` server. It never touches an executable, making it almost instant.
+      * **Tier 1 (Proxy - High Priority):** For supported domains (**YouTube, Twitch, VRCDN, Discord**), the request is sent to the `whyknot.dev` server. The server resolves the stream using the absolute latest master-branch fixes and returns a stable, proxied HLS stream directly to your VRChat client.
+      * **Tier 2 (Modern Local):** If the site is unsupported by Tier 1, it attempts resolution using a bundled, up-to-date version of `yt-dlp.exe` and its `Deno` runtime.
+      * **Tier 3 (Legacy Fallback):** If all else fails, it passes the request to VRChat's original `yt-dlp.exe` (backed up as `yt-dlp-og.exe`), ensuring no original functionality is lost.
 
-      * **Tier 2 (Modern - `yt-dlp-latest.exe`):** If the link is **not for YouTube**, the wrapper first tries to resolve it using a bundled, up-to-date version of `yt-dlp.exe` and its `deno.exe` runtime. This can handle many modern video sites that VRChat's old version can't.
+## Features
 
-      * **Tier 3 (Fallback - `yt-dlp-og.exe`):** If Tier 2 fails (e.g., the site is unsupported), the wrapper passes the request to VRChat's original `yt-dlp.exe` (which was backed up as `yt-dlp-og.exe`). This ensures that any link that would have worked in VRChat *without* the patch still works.
-
-## For Your Friends (Manual Converter)
-
-Don't want your friends to have to install a program? You can manually convert a YouTube link for them using the public web tool:
-
-**[https://yt.whyknot.dev/](https://yt.whyknot.dev/)**
-
-Just paste a YouTube URL there, get the proxied link, and paste that into a VRChat video player. This only works for YouTube and (like the patcher) only in private worlds.
+- **Automated Instance Detection:** Smoothly switches between patched and original files as you move between worlds.
+- **Master Branch Tracking:** The proxy server always uses the absolute latest `yt-dlp` code from the master branch, often fixed weeks before an official release.
+- **HLS/TS Support:** Seamlessly handles live streams from VRCDN and Twitch.
+- **Smart Rate Limiting:** Avoids 429 errors by intelligently managing VRChat's aggressive HEAD/GET request pairs.
 
 ## Usage
 
 1.  Download the latest release from the [GitHub Releases](https://github.com/RealWhyKnot/VRCYTProxy/releases) page.
-2.  Extract the downloaded `.zip` file somewhere convenient.
-3.  Run `patcher.exe`.
-4.  A console window will appear, showing the patcher's status. You can minimize this window.
-5.  Launch VRChat and enjoy\! The patcher will handle everything in the background.
+2.  Extract the `.zip` file.
+3.  Run `patcher.exe`. You can minimize the console window.
+4.  Launch VRChat. The patcher will handle the rest.
 
-To stop the patcher, simply close the console window. It will automatically clean up and restore the original VRChat files.
-
-## How to Run
-
-After building from source or extracting a release `.zip` file, you will have a single application folder (e.g., `dist/`). The structure will look like this:
-
-```
-<application_folder>/
-├── patcher.exe
-├── wrapper_filelist.json
-├── resources/
-│   └── wrapper_files/
-│       ├── yt-dlp-wrapper.exe
-│       ├── yt-dlp-latest.exe
-│       ├── deno.exe
-│       ├── _internal/
-│       └── ... (many other dependency files)
-└── ... (patcher's dependency files)
-```
-
-To run the application, simply execute `patcher.exe` from within this main application folder. It will open a console window and begin monitoring VRChat. All the other files and folders must be kept in the same directory as `patcher.exe` for it to function correctly.
+To uninstall, simply close `patcher.exe`. It will automatically restore your original VRChat files before exiting.
 
 ## Building from Source
 
-The build process is now fully automated with a single PowerShell script. You will need **Python 3.10+** and **PowerShell**.
+The build process is fully automated and requires **Python 3.13** and **Conda**.
 
 1.  **Clone the repository:**
-
     ```bash
     git clone https://github.com/RealWhyKnot/VRCYTProxy.git
     cd VRCYTProxy
     ```
 
 2.  **Run the build script:**
-
     ```powershell
-    # This will download all dependencies, pin their versions, and build the project
+    # This will setup a Conda environment and build all components
     .\build.ps1
     ```
 
-3.  **Find the output:**
-    Once the script has finished successfully, you will find the complete, runnable application in the `dist` directory.
+3.  **Smart Dependency Management:**
+    The script tracks upstream changes. It will only redownload `Deno` or rebuild `yt-dlp` from master if it detects a new version/commit on GitHub. To force a full rebuild of everything, use `.\build.ps1 -Force`.
 
-### How Dependencies Work
+## Manual Conversion
 
-The build script manages its own dependencies (`deno.exe` and `yt-dlp-latest.exe`) in a `vendor/` folder.
-
-  * **First Run:** The script fetches the latest stable versions from GitHub and saves their version tags to a new `vendor_versions.json` file.
-  * **Subsequent Runs:** The script reads `vendor_versions.json` to download the *exact* same versions, ensuring a reproducible build.
-  * **To get new dependencies:** Run `.\build.ps1 -Force` to ignore the JSON file, fetch the latest versions, and overwrite `vendor_versions.json` with the new tags.
+If you want to share a link with friends who don't have the patcher, use the web tool:
+**[https://whyknot.dev/](https://whyknot.dev/)** (Download section in navbar)

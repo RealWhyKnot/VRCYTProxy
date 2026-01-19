@@ -1,5 +1,12 @@
 # Changelog
 
+## [v2026.01.19.8] - 2026-01-19
+### Fixed
+- **Build**: Fixed absolute path resolution for `conda.exe` in GitHub Actions.
+- **Build**: Switched to `python -m PyInstaller` for all components to improve build stability.
+- **Workflow**: Implemented `GITHUB_TOKEN` authentication for metadata fetching to avoid rate limits.
+- **Automation**: Added standalone `yt-dlp` icon support and dynamically resolved entry points.
+
 ## [v2026.01.19.6] - 2026-01-19
 ### Fixed
 - **Workflow**: Added `GITHUB_TOKEN` authentication to resolve 403 Forbidden errors when fetching metadata.

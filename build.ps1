@@ -58,7 +58,7 @@ $IconArg = ""
 
 if (Test-Path $IconPath) {
     Write-Host "Icon found at: $IconPath" -ForegroundColor Cyan
-    $IconArg = "--icon=""$IconPath"""
+    $IconArg = "--icon=$IconPath"
 } else {
     Write-Host "No icon found at '$IconPath'. Building with default icon." -ForegroundColor Yellow
 }
@@ -82,7 +82,7 @@ try {
     Write-Host "Fetching latest metadata from GitHub..."
     $Headers = @{ "Accept" = "application/vnd.github.v3+json" }
     if ($env:GITHUB_TOKEN) {
-        Write-Host "Using GITHUB_TOKEN for authentication."
+        Write-Host "Using GITHUB_TOKEN for authenticated API calls."
         $Headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)"
     }
     
@@ -109,9 +109,9 @@ try {
     $CondaEnvName = "VRCYTProxy_Build"
     $IsCI = $env:GITHUB_ACTIONS -eq "true"
 
-    # Smart environment management - use conda.exe for explicit pathing in CI if needed
+    # Use conda.exe in CI for better path resolution
     $CondaCmd = if ($IsCI) { "conda.exe" } else { "conda" }
-    
+
     $EnvList = & $CondaCmd env list
     $EnvExists = $EnvList -match "\b$CondaEnvName\b"
 
@@ -146,7 +146,7 @@ try {
             Write-Host "   -> Updating hardcoded fallback version in main.py to $Version..." -ForegroundColor Cyan
             $MainPyContent = Get-Content $MainPyPath -Raw
             # Match CURRENT_VERSION = "v..."
-            $MainPyContent = $MainPyContent -replace 'CURRENT_VERSION = "v[^"]+"', "CURRENT_VERSION = `"$Version`""
+            $MainPyContent = $MainPyContent -replace 'CURRENT_VERSION = "v[^" ]+"', "CURRENT_VERSION = `"$Version`""
             [System.IO.File]::WriteAllText($MainPyPath, $MainPyContent)
         }
     }
@@ -157,6 +157,11 @@ try {
     Write-Host "Updating pip..."
     & $VenvPython -m pip install --upgrade pip --quiet
     
+    if ($NeedsYtdlp) {
+        Write-Host "Installing yt-dlp from master source for build..." -ForegroundColor Cyan
+        & $VenvPython -m pip install https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz --quiet
+    }
+
     Write-Host "Installing PyInstaller from source (this may take a few minutes)..." -ForegroundColor Yellow
     # Using --progress-bar on and direct execution to avoid conda run hangs
     & $VenvPip install --force-reinstall --no-binary pyinstaller pyinstaller --progress-bar on
@@ -177,42 +182,35 @@ try {
     
     Write-Host "[4/6] Building executables..." -ForegroundColor Green
 
-        if ($NeedsYtdlp) {
-
-            Write-Host "   -> Building yt-dlp (Latest Master: $($LatestYtdlpHash.Substring(0,7)))..." -ForegroundColor Cyan
-
-            & $VenvPython -m pip install https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz --quiet
-
-            
-
-            $YtDlpBuildArgs = @(
-
-                "--noconfirm",
-
-                "--onefile",
-
-                "--name", "yt-dlp-latest",
-
-                "--distpath", $VendorDir
-
-            )
-
-                    # Build yt-dlp using its internal entry point
-                    $YtMain = & $VenvPython -c "import yt_dlp, os; print(os.path.join(os.path.dirname(yt_dlp.__file__), '__main__.py'))"
-                    Write-Host "   -> Entry Point: $YtMain"
-                        & $CondaCmd run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp --hidden-import "yt_dlp.utils._utils" --hidden-import "yt_dlp.extractor.lazy_extractors" $YtMain
-
-                    Write-Host "   -> yt-dlp build complete."
-
-            
-
-        }
-
-     else {
+    if ($NeedsYtdlp) {
+        Write-Host "   -> Building standalone yt-dlp (Latest Master: $($LatestYtdlpHash.Substring(0,7)))..." -ForegroundColor Cyan
+        
+                $YtDlpBuildArgs = @(
+        
+                    "--noconfirm",
+        
+                    "--onefile",
+        
+                    "--name", "yt-dlp-latest",
+        
+                    "--distpath", $VendorDir
+        
+                )
+        
+                if ($IconArg) { $YtDlpBuildArgs += $IconArg }
+        
+                # Build yt-dlp using its internal entry point
+        
+        
+        $YtMain = & $VenvPython -c "import yt_dlp, os; print(os.path.join(os.path.dirname(yt_dlp.__file__), '__main__.py'))"
+        Write-Host "   -> Entry Point: $YtMain"
+        & $CondaCmd run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp --hidden-import "yt_dlp.utils._utils" --hidden-import "yt_dlp.extractor.lazy_extractors" $YtMain
+        Write-Host "   -> yt-dlp build complete."
+    } else {
         Write-Host "   -> yt-dlp is up to date. Using existing binary." -ForegroundColor Gray
     }
 
-    # Always update versions file after checks
+    # Always update versions file after successful metadata fetch/build
     @{ deno = $LatestDenoVer; ytdlp_hash = $LatestYtdlpHash } | ConvertTo-Json | Out-File $VersionFilePath
 
     Write-Host "   -> Building Redirector..." -ForegroundColor Cyan
@@ -225,10 +223,10 @@ try {
         "--specpath", $BuildDir,
         "--name", "yt-dlp-wrapper"
     )
-    if ($IconArg) { $RedirectorArgs += "--icon", $IconPath }
+    if ($IconArg) { $RedirectorArgs += $IconArg }
     $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
 
-        & $CondaCmd run -n $CondaEnvName pyinstaller @RedirectorArgs
+    & $CondaCmd run -n $CondaEnvName python -m PyInstaller @RedirectorArgs
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
@@ -253,10 +251,10 @@ try {
         "--specpath", $BuildDir,
         "--name", "patcher"
     )
-    if ($IconArg) { $PatcherArgs += "--icon", $IconPath }
+    if ($IconArg) { $PatcherArgs += $IconArg }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
-        & $CondaCmd run -n $CondaEnvName pyinstaller @PatcherArgs
+    & $CondaCmd run -n $CondaEnvName python -m PyInstaller @PatcherArgs
         
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 

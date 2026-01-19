@@ -22,8 +22,7 @@ jobs:
         with:
           auto-update-conda: true
           python-version: '3.13'
-          activate-environment: VRCYTProxy_Build
-          use-only-tar-bz2: true # Important for caching performance
+          auto-activate-base: false
       
       - name: Run the build script (Windows)
         run: .\build.ps1 -Version ${{ github.ref_name }}

@@ -84,21 +84,25 @@ try {
     if ($Force -or -not (Test-Path $DenoPath) -or -not (Test-Path $YtdlpPath)) {
         Write-Host "Checking for latest dependency versions..."
         $Headers = @{ "Accept" = "application/vnd.github.v3+json" }
-        $DenoVer = if ($PinnedVersions.deno) { $PinnedVersions.deno } else { (Invoke-RestMethod "https://api.github.com/repos/denoland/deno/releases/latest" -Headers $Headers).tag_name }
-        $YtdlpVer = if ($PinnedVersions.ytdlp) { $PinnedVersions.ytdlp } else { (Invoke-RestMethod "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" -Headers $Headers).tag_name }
         
-        if (-not (Test-Path $DenoPath)) {
+        # Always fetch latest from GitHub unless Force is NOT set AND we have local files
+        $DenoVer = (Invoke-RestMethod "https://api.github.com/repos/denoland/deno/releases/latest" -Headers $Headers).tag_name
+        $YtdlpVer = (Invoke-RestMethod "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" -Headers $Headers).tag_name
+        
+        if ($Force -or -not (Test-Path $DenoPath) -or ($PinnedVersions.deno -ne $DenoVer)) {
             Write-Host "Downloading Deno $DenoVer..." -ForegroundColor Cyan
             Invoke-WebRequest "https://github.com/denoland/deno/releases/download/$DenoVer/deno-x86_64-pc-windows-msvc.zip" -OutFile (Join-Path $VendorDir "deno.zip")
             Expand-Archive (Join-Path $VendorDir "deno.zip") -DestinationPath $VendorDir -Force
             Remove-Item (Join-Path $VendorDir "deno.zip")
             Write-Host "Deno downloaded."
         }
-        if (-not (Test-Path $YtdlpPath)) {
+        
+        if ($Force -or -not (Test-Path $YtdlpPath) -or ($PinnedVersions.ytdlp -ne $YtdlpVer)) {
             Write-Host "Downloading yt-dlp $YtdlpVer..." -ForegroundColor Cyan
             Invoke-WebRequest "https://github.com/yt-dlp/yt-dlp/releases/download/$YtdlpVer/yt-dlp.exe" -OutFile $YtdlpPath
             Write-Host "yt-dlp downloaded."
         }
+        
         @{ deno = $DenoVer; ytdlp = $YtdlpVer } | ConvertTo-Json | Out-File $VersionFilePath
         Write-Host "Updated vendor_versions.json"
     }
@@ -108,13 +112,13 @@ try {
     
     # Force wipe existing environment
     Write-Host "Wiping existing Conda environment '$CondaEnvName'..."
-    & conda.exe remove -n $CondaEnvName --all -y 2>$null
+    & conda remove -n $CondaEnvName --all -y 2>$null
     
     Write-Host "Creating fresh Conda environment '$CondaEnvName'..."
-    & conda.exe create -n $CondaEnvName python=3.13 -y
+    & conda create -n $CondaEnvName python=3.13 -y
 
     # Get paths from conda
-    $EnvInfo = & conda.exe run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
+    $EnvInfo = & conda run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
     $EnvInfoLines = $EnvInfo -split "`r`n"
     $VenvPython = $EnvInfoLines[0].Trim()
     $VenvScripts = $EnvInfoLines[1].Trim()
@@ -175,7 +179,7 @@ try {
     if ($IconArg) { $RedirectorArgs += "--icon", $IconPath }
     $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
 
-    & conda.exe run -n $CondaEnvName pyinstaller @RedirectorArgs
+    & conda run -n $CondaEnvName pyinstaller @RedirectorArgs
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
@@ -203,7 +207,7 @@ try {
     if ($IconArg) { $PatcherArgs += "--icon", $IconPath }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
-    & conda.exe run -n $CondaEnvName pyinstaller @PatcherArgs
+    & conda run -n $CondaEnvName pyinstaller @PatcherArgs
         
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 

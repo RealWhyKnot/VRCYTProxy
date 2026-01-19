@@ -1,5 +1,11 @@
 # Changelog
 
+## [v2026.01.19.3] - 2026-01-19
+### Added
+- **Automation**: Build script now automatically fetches and downloads the latest `yt-dlp` and `Deno` versions from GitHub.
+### Fixed
+- **Workflow**: Fixed "conda.exe not recognized" by reverting to `conda` command.
+
 ## [v2026.01.19.2] - 2026-01-19
 ### Fixed
 - **Workflow**: Resolved `CondaValueError` regarding reserved 'base' name by using `auto-activate-base: true`.

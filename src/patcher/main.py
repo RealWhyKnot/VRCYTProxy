@@ -22,8 +22,10 @@ if platform.system() == 'Windows':
 
 try:
     from _version import __version__ as CURRENT_VERSION
+    from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2025.12.30.0"
+    CURRENT_VERSION = "v2026.01.18.dev-main-58253ef"
+    BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
 GITHUB_REPO_NAME = "VRCYTProxy"
@@ -282,7 +284,7 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
         logger.error(f"Failed to update wrapper state: {e}")
 
 def check_for_updates():
-    if "dev" in CURRENT_VERSION:
+    if BUILD_TYPE == "DEV":
         logger.info(f"Running Dev Build ({CURRENT_VERSION}). Skipping update check.")
         return
     logger.info(f"Checking for updates (Current: {CURRENT_VERSION})...")
@@ -302,40 +304,6 @@ def check_for_updates():
                 logger.info("Patcher is up to date.")
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
-
-def is_game_running():
-    try:
-        import subprocess
-        # Use tasklist for primary detection as it's the most reliable on Windows
-        output = subprocess.check_output('tasklist /FI "IMAGENAME eq VRChat.exe" /NH', shell=True, stderr=subprocess.DEVNULL).decode()
-        
-        if "VRChat.exe" in output or "vrchat.exe" in output:
-            # Extract PID - tasklist /NH output format: VRChat.exe  12345  Console ...
-            parts = output.split()
-            pid = None
-            for i, part in enumerate(parts):
-                if part.lower() == "vrchat.exe" and i + 1 < len(parts):
-                    pid = parts[i+1]
-                    break
-            
-            if pid:
-                # Try to get CreationDate for session locking, but don't fail if wmic is unavailable
-                try:
-                    # format:list is easier to parse than CSV
-                    cmd = f'wmic process where ProcessId={pid} get CreationDate /format:list'
-                    wmic_out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
-                    for line in wmic_out.splitlines():
-                        if 'CreationDate=' in line:
-                            return pid, line.split('=')[1].strip()
-                except Exception:
-                    pass
-                
-                return pid, "active-session"
-        
-        return None, None
-    except Exception as e:
-        # Fallback to very basic check if even tasklist fails
-        return None, None
 
 def check_wrapper_health(wrapper_file_list):
     try:
@@ -719,7 +687,7 @@ signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0))
 def main():
     install_exit_handler()
     
-    logger.info(f"Patcher {CURRENT_VERSION} starting up...")
+    logger.info(f"Patcher {CURRENT_VERSION} ({BUILD_TYPE}) starting up...")
     check_for_updates()
     
     try:
@@ -741,63 +709,55 @@ def main():
     vrc_monitor_thread = threading.Thread(target=log_monitor_thread_func, args=(monitor, stop_event), daemon=True)
     vrc_monitor_thread.start()
 
-    is_paused = False
-    current_game_pid = None
-    current_game_time = None
-    
     last_health_check_time = 0
     last_file_watch_time = 0
     
-    logger.info("Scanning for active VRChat session...")
+    logger.info("Monitoring VRChat logs for activity...")
     
     try:
         while True:
-            # 1. Process Check
-            game_pid, game_time = is_game_running()
-            
-            if not game_pid:
-                if not is_paused:
-                    logger.info("VRChat not detected. Pausing operations until game starts...")
-                    is_paused = True
-                    current_game_pid = None
-                    current_game_time = None
-                time.sleep(POLL_INTERVAL)
-                continue
-            
-            if game_pid != current_game_pid or game_time != current_game_time:
-                if current_game_pid:
-                    logger.info(f"VRChat session change detected (PID: {game_pid}). Resetting log monitor.")
-                else:
-                    logger.info(f"VRChat detected (PID: {game_pid}). Resuming operations...")
-                
-                is_paused = False
-                current_game_pid = game_pid
-                current_game_time = game_time
-                monitor.current_log = None # Force re-discovery
-
-            # 2. Log Discovery (Continuous check for the best log)
-            latest_log = find_latest_log_file()
-            if latest_log and (not monitor.current_log or latest_log > monitor.current_log):
-                monitor.update_log_file(latest_log)
-
             now = time.time()
+
+            # 1. Log Discovery (Continuous check for the newest log)
+            latest_log = find_latest_log_file()
             
-            # 3. Proactive File Watch
+            if latest_log:
+                if latest_log != monitor.current_log:
+                    # New log file detected
+                    logger.info(f"New session detected via log: {os.path.basename(latest_log)}")
+                    monitor.update_log_file(latest_log)
+                
+                # Check for log activity to see if the game is "active"
+                try:
+                    mtime = os.path.getmtime(latest_log)
+                    if now - mtime > 60: # No writes for 60 seconds
+                        if monitor.last_instance_type != "idle":
+                            logger.info("Log activity ceased. Entering idle state.")
+                            monitor.last_instance_type = "idle"
+                except Exception: pass
+            else:
+                if monitor.last_instance_type != "no_logs":
+                    logger.warning("No VRChat logs found.")
+                    monitor.last_instance_type = "no_logs"
+
+            # 2. Proactive File Watch
             if now - last_file_watch_time > 1.0:
+                # If we aren't in a public/group world, we enable the patch.
+                # idle/no_logs states also keep it enabled to be ready for next launch.
                 should_disable = monitor.last_instance_type in ['public', 'group_public']
                 desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
                 current_state = get_patch_state()
                 
                 if desired_state == PatchState.ENABLED and current_state == PatchState.DISABLED:
-                    logger.info("VRChat regenerated original yt-dlp.exe. Re-applying wrapper...")
+                    logger.info("Re-applying wrapper based on log state...")
                     enable_patch(WRAPPER_FILE_LIST, False)
                 elif desired_state == PatchState.DISABLED and current_state == PatchState.ENABLED:
-                    logger.info("World changed to PUBLIC. Restoring original yt-dlp.exe...")
+                    logger.info("World changed to PUBLIC (via log). Restoring original yt-dlp.exe...")
                     disable_patch(WRAPPER_FILE_LIST)
                 
                 last_file_watch_time = now
 
-            # 4. Health Check
+            # 3. Health Check
             if now - last_health_check_time > 10.0:
                 if get_patch_state() == PatchState.ENABLED:
                     check_wrapper_health(WRAPPER_FILE_LIST)

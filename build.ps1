@@ -15,10 +15,24 @@ Write-Host "================================================="
 Write-Host ""
 
 if (-not $Version) {
-    Write-Host "Version argument not provided. Python script will use fallback." -ForegroundColor Yellow
-} else {
-    Write-Host "Target Version: $Version" -ForegroundColor Green
+    Write-Host "Version argument not provided. Generating dynamic version..." -ForegroundColor Yellow
+    $DateStr = Get-Date -Format "yyyy.MM.dd"
+    $GitHash = & git rev-parse --short HEAD 2>$null
+    $GitBranch = & git rev-parse --abbrev-ref HEAD 2>$null
+    
+    if ($GitHash -and $GitBranch) {
+        $Version = "v$DateStr.dev-$GitBranch-$GitHash"
+    } else {
+        $Version = "v$DateStr.dev-local"
+    }
 }
+
+$IsRelease = $Version -notmatch "dev"
+$FullVersionString = if ($IsRelease) { "$Version (RELEASE)" } else { "$Version (DEV)" }
+
+Write-Host "-------------------------------------------------"
+Write-Host "   Target Version: $FullVersionString"
+Write-Host "-------------------------------------------------" -ForegroundColor Cyan
 
 $PythonExe = "python" 
 $VendorDir = Join-Path $PSScriptRoot "vendor"
@@ -89,17 +103,15 @@ try {
         Write-Host "Updated vendor_versions.json"
     }
 
-    Write-Host "[1/6] Setting up Conda environment..." -ForegroundColor Green
+    Write-Host "[1/6] Setting up fresh Conda environment..." -ForegroundColor Green
     $CondaEnvName = "VRCYTProxy_Build"
     
-    # Check if conda environment exists
-    $CondaEnvs = & conda env list | Out-String
-    if ($CondaEnvs -notmatch $CondaEnvName) {
-        Write-Host "Creating Conda environment '$CondaEnvName'..."
-        & conda create -n $CondaEnvName python=3.10 -y
-    } else {
-        Write-Host "Conda environment '$CondaEnvName' already exists."
-    }
+    # Force wipe existing environment
+    Write-Host "Wiping existing Conda environment '$CondaEnvName'..."
+    & conda remove -n $CondaEnvName --all -y 2>$null
+    
+    Write-Host "Creating fresh Conda environment '$CondaEnvName'..."
+    & conda create -n $CondaEnvName python=3.10 -y
 
     # Get paths from conda
     $EnvInfo = & conda run -n $CondaEnvName python -c "import sys, os; print(sys.executable); print(os.path.join(os.path.dirname(sys.executable), 'Scripts'))"
@@ -112,10 +124,29 @@ try {
     
     Write-Host "Conda Python: $VenvPython"
 
+    # Automatically update the hardcoded fallback version in main.py
+    if ($Version -and $Version -match "^v") {
+        $MainPyPath = Join-Path $SrcPatcherDir "main.py"
+        if (Test-Path $MainPyPath) {
+            Write-Host "   -> Updating hardcoded fallback version in main.py to $Version..." -ForegroundColor Cyan
+            $MainPyContent = Get-Content $MainPyPath -Raw
+            # Match CURRENT_VERSION = "v..."
+            $MainPyContent = $MainPyContent -replace 'CURRENT_VERSION = "v[^"]+"', "CURRENT_VERSION = `"$Version`""
+            [System.IO.File]::WriteAllText($MainPyPath, $MainPyContent)
+        }
+    }
+
     Write-Host "[2/6] Installing/Updating dependencies in Conda..." -ForegroundColor Green
-    & conda run -n $CondaEnvName pip install --upgrade pip
-    & conda run -n $CondaEnvName pip install pyinstaller
-    Write-Host "Dependencies installed."
+    $env:PYINSTALLER_COMPILE_BOOTLOADER = "1"
+    
+    Write-Host "Updating pip..."
+    & $VenvPython -m pip install --upgrade pip --quiet
+    
+    Write-Host "Installing PyInstaller from source (this may take a few minutes)..." -ForegroundColor Yellow
+    # Using --progress-bar on and direct execution to avoid conda run hangs
+    & $VenvPip install --force-reinstall --no-binary pyinstaller pyinstaller --progress-bar on
+    
+    Write-Host "Dependencies installed (PyInstaller bootloader recompiled)."
 
     Write-Host "[3/6] Cleaning directories..." -ForegroundColor Green
     if (Test-Path $DistDir) { 
@@ -152,16 +183,13 @@ try {
     Write-Host "   -> Wrapper file list generated ($($WrapperFiles.Count) files)."
 
     $VersionFile = Join-Path $SrcPatcherDir "_version.py"
+    $BuildType = if ($IsRelease) { "RELEASE" } else { "DEV" }
     
-    if ($Version) {
-        Write-Host "   -> Generating version file: $Version"
-        "__version__ = '$Version'" | Out-File -FilePath $VersionFile -Encoding UTF8
-        Write-Host "      File created at: $VersionFile"
-    } else {
-        Write-Host "   -> No version provided. Skipping _version.py generation (using python fallback)."
-    }
+    Write-Host "   -> Generating version file: $Version ($BuildType)"
+    "__version__ = '$Version'`n__build_type__ = '$BuildType'" | Out-File -FilePath $VersionFile -Encoding UTF8
+    Write-Host "      File created at: $VersionFile"
 
-    $DisplayVersion = if ($Version) { $Version } else { "dev-fallback" }
+    $DisplayVersion = "$Version ($BuildType)"
     Write-Host "   -> Building Patcher (Version: $DisplayVersion)..." -ForegroundColor Cyan
     
     $PatcherArgs = @(

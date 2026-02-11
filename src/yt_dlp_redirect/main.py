@@ -39,6 +39,8 @@ LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
 DENO_PATH = os.path.join(APP_BASE_PATH, DENO_FILENAME)
 
+IS_DEV_BUILD = not getattr(sys, 'frozen', False)
+
 DEFAULT_CONFIG = {
     "remote_server": "https://whyknot.dev",
     "proxy_all": False,
@@ -59,7 +61,16 @@ DEFAULT_CONFIG = {
         "group": "~group"
     },
     "proxy_domain": "whyknot.dev",
-    "vrchat_log_dir": os.path.join(os.environ.get('USERPROFILE', ''), 'AppData', 'LocalLow', 'VRChat', 'VRChat')
+    "vrchat_log_dir": os.path.join(os.environ.get('USERPROFILE', ''), 'AppData', 'LocalLow', 'VRChat', 'VRChat'),
+    "debug_mode": IS_DEV_BUILD,
+    "failure_retry_window": 15,
+    "resolution_timeout": 5.0,
+    "preferred_max_height": 1080,
+    "enable_tier1_proxy": True,
+    "enable_tier2_local": True,
+    "enable_tier3_native": True,
+    "custom_user_agent": None,
+    "force_patch_in_public": False
 }
 
 def load_config():
@@ -71,23 +82,20 @@ def load_config():
             with open(WRAPPER_CONFIG_PATH, 'r') as f:
                 user_config = json.load(f)
                 
-                # Check for type mismatch (e.g. if file is just "null" or empty string)
                 if not isinstance(user_config, dict):
                     raise ValueError("Config must be a JSON object")
                     
-                # Ensure all default keys exist
+                # Merge and detect if we need to save missing keys
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in user_config:
                         user_config[k] = v
                         needs_save = True
                 config = user_config
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Config file is invalid or corrupted: {e}. Regenerating with defaults...")
-            config = DEFAULT_CONFIG.copy()
+            sys.stderr.write(f"Config file is invalid or corrupted: {e}. Regenerating defaults...\n")
             needs_save = True
         except Exception as e:
-            logger.error(f"Unexpected error loading config: {e}. Using defaults.")
-            config = DEFAULT_CONFIG.copy()
+            sys.stderr.write(f"Unexpected error loading config: {e}. Using defaults.\n")
     else:
         needs_save = True
 
@@ -95,9 +103,8 @@ def load_config():
         try:
             with open(WRAPPER_CONFIG_PATH, 'w') as f:
                 json.dump(config, f, indent=4)
-            logger.info(f"Configuration file updated/regenerated at {WRAPPER_CONFIG_PATH}")
         except Exception as e:
-            logger.error(f"Failed to save config: {e}")
+            sys.stderr.write(f"Failed to save config: {e}\n")
             
     return config
 
@@ -106,12 +113,18 @@ REMOTE_SERVER_BASE = CONFIG.get("remote_server", "https://whyknot.dev")
 
 def setup_logging():
     logger = logging.getLogger('RedirectWrapper')
-    logger.setLevel(logging.INFO)
+    
+    # Logic: If debug_mode is True, log everything (DEBUG). 
+    # If False, log only ERROR and above.
+    is_debug = CONFIG.get("debug_mode", False)
+    level = logging.DEBUG if is_debug else logging.ERROR
+    logger.setLevel(level)
     
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     try:
-        handler = FileHandler(LOG_FILE_PATH, mode='w', encoding='utf-8')
+        # Append mode for logs
+        handler = FileHandler(LOG_FILE_PATH, mode='a', encoding='utf-8')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     except Exception as e:
@@ -240,7 +253,13 @@ def process_and_execute(incoming_args):
     forced_tier = 0 # 0 = Normal, 1 = Skip Tier 1, 2 = Skip Tier 1&2
     
     target_url = find_url_in_args(incoming_args)
-    logger.info(f"URL found in arguments: {target_url}")
+    logger.debug(f"URL found in arguments: {target_url}")
+
+    # Configuration Checks
+    retry_window = CONFIG.get("failure_retry_window", 15)
+    t1_enabled = CONFIG.get("enable_tier1_proxy", True)
+    t2_enabled = CONFIG.get("enable_tier2_local", True)
+    t3_enabled = CONFIG.get("enable_tier3_native", True)
 
     # Check for fallback state
     current_time = time.time()
@@ -263,8 +282,8 @@ def process_and_execute(incoming_args):
                     failed_info = state['failed_urls'].get(target_url, {})
                     last_req = failed_info.get('last_request_time', 0)
                     
-                    # DETECTION LOGIC: If called again within 15s, assume playback failure
-                    if current_time - last_req < 15:
+                    # DETECTION LOGIC: If called again within the window, assume playback failure
+                    if current_time - last_req < retry_window:
                         # Increment tier based on previous failure or just start escalating
                         current_tier = failed_info.get('tier', 0)
                         forced_tier = current_tier + 1
@@ -292,13 +311,13 @@ def process_and_execute(incoming_args):
             logger.error(f"Failed to read/update wrapper state: {e}")
 
     # Health check the proxy if not already disabled
-    if not proxy_disabled:
+    if not proxy_disabled and t1_enabled:
         if not check_proxy_online():
             logger.warning("Proxy is offline or unreachable. Disabling Tier 1 (Proxy).")
             proxy_disabled = True
 
     if not target_url:
-        logger.warning("No URL found in arguments. Passing to VRChat's yt-dlp as a fallback.")
+        logger.debug("No URL found in arguments. Passing to VRChat's yt-dlp as a fallback.")
         final_output, return_code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args)
         if final_output:
             safe_print(final_output)
@@ -309,9 +328,11 @@ def process_and_execute(incoming_args):
     # Expand proxied domains based on config
     proxy_all = CONFIG.get("proxy_all", False)
     proxy_domains = CONFIG.get("proxy_domains", [])
+    res_timeout = CONFIG.get("resolution_timeout", 5.0)
+    custom_ua = CONFIG.get("custom_user_agent")
     
     should_proxy = False
-    if target_url and not is_already_proxied:
+    if target_url and not is_already_proxied and t1_enabled:
         if proxy_all:
             should_proxy = True
         else:
@@ -319,31 +340,34 @@ def process_and_execute(incoming_args):
             if domain_pattern and re.search(domain_pattern, target_url, re.IGNORECASE):
                 should_proxy = True
     
-    logger.info(f"Analysis: Should Proxy? {bool(should_proxy)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}. Forced Tier: {forced_tier}")
+    logger.debug(f"Analysis: Should Proxy? {bool(should_proxy)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}. Forced Tier: {forced_tier}")
 
     if should_proxy and not proxy_disabled and forced_tier < 1:
-        logger.info(f"Tier 1: Proxyable URL detected ({target_url}). Resolving via server...")
+        logger.debug(f"Tier 1: Proxyable URL detected ({target_url}). Resolving via server...")
         
         try:
-            # Use the more powerful /api/stream/resolve endpoint
             # Find video type in args
             video_type = "va"
             for i, arg in enumerate(incoming_args):
                 if arg == "--format" and i + 1 < len(incoming_args):
-                    if "bestvideo" in incoming_args[i+1] and "bestaudio" not in incoming_args[i+1]:
+                    fmt_val = incoming_args[i+1]
+                    if "bestvideo" in fmt_val and "bestaudio" not in fmt_val:
                         video_type = "v"
-                    elif "bestaudio" in incoming_args[i+1] and "bestvideo" not in incoming_args[i+1]:
+                    elif "bestaudio" in fmt_val and "bestvideo" not in fmt_val:
                         video_type = "a"
 
             resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
+            if custom_ua:
+                resolve_url += f"&ua={quote_plus(custom_ua)}"
+
             req = urllib.request.Request(resolve_url, method='GET')
             
-            with urllib.request.urlopen(req, timeout=5.0) as response:
+            with urllib.request.urlopen(req, timeout=res_timeout) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode())
                     new_url = data.get("stream_url")
                     if new_url:
-                        logger.info(f"Tier 1 success. Resolved to: {new_url}")
+                        logger.debug(f"Tier 1 success. Resolved to: {new_url}")
                         update_wrapper_success()
                         safe_print(new_url)
                         return 0
@@ -352,16 +376,18 @@ def process_and_execute(incoming_args):
             # Fall through to Tier 2
 
     if is_already_proxied and not proxy_disabled and forced_tier < 1:
-        logger.info("Tier 1: URL is already proxied. Passing through directly.")
+        logger.debug("Tier 1: URL is already proxied. Passing through directly.")
         update_wrapper_success()
         safe_print(target_url) 
         return 0
     
-    if forced_tier <= 1:
-        logger.info("Tier 2: Attempting to resolve with yt-dlp-latest.exe...")
+    if forced_tier <= 1 and t2_enabled:
+        logger.debug("Tier 2: Attempting to resolve with yt-dlp-latest.exe...")
         
         tier_2_args = []
         skip_next = False
+        max_height = CONFIG.get("preferred_max_height", 1080)
+
         for arg in incoming_args:
             if skip_next:
                 skip_next = False
@@ -371,8 +397,15 @@ def process_and_execute(incoming_args):
                 logger.warning(f"Removing unsupported VRChat argument: {arg}")
                 skip_next = True 
                 continue
-                
+            
             tier_2_args.append(arg)
+
+        # Inject Max Height if not explicitly complex
+        if "-f" not in tier_2_args and "--format" not in tier_2_args:
+            tier_2_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
+
+        if custom_ua:
+            tier_2_args.extend(["--user-agent", custom_ua])
 
         js_runtime_arg = f"deno:{DENO_PATH}"
         tier_2_args.extend(["--js-runtimes", js_runtime_arg])
@@ -385,16 +418,13 @@ def process_and_execute(incoming_args):
         )
         
         if return_code == 0 and resolved_url and resolved_url.startswith('http'):
-            logger.info(f"Tier 2 success. Returning URL: {resolved_url}")
+            logger.debug(f"Tier 2 success. Returning URL: {resolved_url}")
             safe_print(resolved_url)
             return 0
         else:
             logger.warning(f"Tier 2 failed (Code: {return_code}) or returned invalid URL. Output: {resolved_url}")
-            # If we were at Tier 2 and it failed, and we have a target URL, we should tell the patcher
+            # Communicate failure
             if target_url:
-                # We need a way to communicate Tier 2 failure back to the patcher so it can escalate to Tier 3
-                # For now, if the wrapper is running, it can't easily update the patcher's internal state
-                # but it CAN update wrapper_state.json
                 try:
                     if os.path.exists(WRAPPER_STATE_PATH):
                         with open(WRAPPER_STATE_PATH, 'r') as f:
@@ -402,52 +432,56 @@ def process_and_execute(incoming_args):
                         if 'failed_urls' not in state: state['failed_urls'] = {}
                         state['failed_urls'][target_url] = {
                             'expiry': time.time() + 300,
-                            'tier': 2 # Mark that Tier 2 failed
+                            'tier': 2
                         }
                         with open(WRAPPER_STATE_PATH, 'w') as f:
                             json.dump(state, f)
                 except Exception: pass
 
-    logger.info("Tier 3: Falling back to VRChat's yt-dlp-og.exe...")
-    final_output, return_code = attempt_executable(
-        ORIGINAL_YTDLP_PATH, 
-        ORIGINAL_YTDLP_FILENAME, 
-        incoming_args 
-    )
-    
-    if return_code == 0 and final_output:
-        logger.info(f"Tier 3 finished. Returning output to VRChat: {final_output}")
-        safe_print(final_output)
-        return 0
-    else:
-        logger.warning(f"Tier 3 failed (Code: {return_code}) or produced no output.")
+    if t3_enabled:
+        logger.debug("Tier 3: Falling back to VRChat's yt-dlp-og.exe...")
+        final_output, return_code = attempt_executable(
+            ORIGINAL_YTDLP_PATH, 
+            ORIGINAL_YTDLP_FILENAME, 
+            incoming_args 
+        )
         
-        # FINAL LAST RESORT: Try Tier 1 (Proxy) even if we normally wouldn't, 
-        # as long as it's not already a proxy URL and proxy isn't globally dead.
-        if not is_already_proxied and not proxy_disabled and target_url:
-            logger.info("CRITICAL FALLBACK: Tier 3 failed. Attempting Tier 1 (Proxy) as absolute last resort.")
-            try:
-                resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}"
-                req = urllib.request.Request(resolve_url, method='GET')
-                with urllib.request.urlopen(req, timeout=5.0) as response:
-                    if response.status == 200:
-                        data = json.loads(response.read().decode())
-                        new_url = data.get("stream_url")
-                        if new_url:
-                            logger.info(f"Last resort resolution success: {new_url}")
-                            safe_print(new_url)
-                            return 0
-            except: pass
-            
-            # If API fails, fall back to the old redirect style as a literal last resort
-            encoded_url = quote_plus(target_url)
-            new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
-            logger.info(f"Last resort direct rewrite: {new_url}")
-            safe_print(new_url)
+        if return_code == 0 and final_output:
+            logger.debug(f"Tier 3 finished. Returning output to VRChat: {final_output}")
+            safe_print(final_output)
             return 0
+        else:
+            logger.warning(f"Tier 3 failed (Code: {return_code}) or produced no output.")
+            
+            # FINAL LAST RESORT: Try Tier 1 (Proxy) even if we normally wouldn't
+            if not is_already_proxied and not proxy_disabled and target_url and t1_enabled:
+                logger.info("CRITICAL FALLBACK: Tier 3 failed. Attempting Tier 1 (Proxy) as absolute last resort.")
+                try:
+                    video_type = "va" # Default for last resort
+                    resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
+                    if custom_ua:
+                        resolve_url += f"&ua={quote_plus(custom_ua)}"
+                        
+                    req = urllib.request.Request(resolve_url, method='GET')
+                    with urllib.request.urlopen(req, timeout=res_timeout) as response:
+                        if response.status == 200:
+                            data = json.loads(response.read().decode())
+                            new_url = data.get("stream_url")
+                            if new_url:
+                                logger.info(f"Last resort resolution success: {new_url}")
+                                safe_print(new_url)
+                                return 0
+                except: pass
+                
+                # Old redirect style as literal last resort
+                encoded_url = quote_plus(target_url)
+                new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
+                logger.info(f"Last resort direct redirect: {new_url}")
+                safe_print(new_url)
+                return 0
 
-        logger.error(f"All tiers failed for URL: {target_url}")
-        sys.stderr.write(f"Wrapper Error: All tiers failed. Check {LOG_FILE_NAME}\n")
+            logger.error(f"All tiers failed for URL: {target_url}")
+            sys.stderr.write(f"Wrapper Error: All tiers failed. Check {LOG_FILE_NAME}\n")
 
     return return_code
 

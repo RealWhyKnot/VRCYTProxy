@@ -133,27 +133,6 @@ LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
 SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
 
-def setup_logging():
-    logger = logging.getLogger('Patcher')
-    logger.setLevel(logging.DEBUG)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG) 
-    ch.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(ch)
-
-    try:
-        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(file_formatter)
-        logger.addHandler(fh)
-    except Exception:
-        logger.error(f"Failed to set up file logging at {LOG_FILE_PATH}", exc_info=True)
-    return logger
-
-logger = setup_logging()
-
 def load_config(config_path):
     defaults = {
         "video_error_patterns": [
@@ -171,7 +150,10 @@ def load_config(config_path):
             "group_plus": "groupAccessType(plus)",
             "group": "~group"
         },
-        "proxy_domain": "whyknot.dev"
+        "proxy_domain": "whyknot.dev",
+        "debug_mode": BUILD_TYPE == "DEV",
+        "force_patch_in_public": False,
+        "auto_update_check": True
     }
     config = defaults.copy()
     if os.path.exists(config_path):
@@ -180,10 +162,14 @@ def load_config(config_path):
                 user_config = json.load(f)
                 if not isinstance(user_config, dict):
                     raise ValueError("Config must be a JSON object")
+                
+                needs_save = False
                 for k, v in defaults.items():
                     if k not in user_config:
                         user_config[k] = v
+                        needs_save = True
                 config = user_config
+                if needs_save: save_config(config_path, config)
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Failed to load config from {config_path}: {e}. Regenerating defaults...")
             save_config(config_path, defaults)
@@ -192,6 +178,34 @@ def load_config(config_path):
     else:
         save_config(config_path, defaults)
     return config
+
+def setup_logging():
+    logger = logging.getLogger('Patcher')
+    
+    # Check config for debug mode early
+    config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
+    temp_cfg = load_config(config_path)
+    is_debug = temp_cfg.get("debug_mode", BUILD_TYPE == "DEV")
+    
+    level = logging.DEBUG if is_debug else logging.ERROR
+    logger.setLevel(level)
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(level) 
+    ch.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(ch)
+
+    try:
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
+        fh.setLevel(level)
+        fh.setFormatter(file_formatter)
+        logger.addHandler(fh)
+    except Exception:
+        pass
+    return logger
+
+logger = setup_logging()
 
 def save_config(config_path, config_data):
     try:
@@ -293,10 +307,12 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
         logger.error(f"Failed to update wrapper state: {e}")
 
 def check_for_updates():
-    if BUILD_TYPE == "DEV":
-        logger.info(f"Running Dev Build ({CURRENT_VERSION}). Skipping update check.")
+    if not CONFIG.get("auto_update_check", True):
         return
-    logger.info(f"Checking for updates (Current: {CURRENT_VERSION})...")
+    if BUILD_TYPE == "DEV":
+        logger.debug(f"Running Dev Build ({CURRENT_VERSION}). Skipping update check.")
+        return
+    logger.debug(f"Checking for updates (Current: {CURRENT_VERSION})...")
     api_url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
     try:
         req = urllib.request.Request(api_url)
@@ -305,12 +321,13 @@ def check_for_updates():
             data = json.loads(response.read().decode('utf-8'))
             latest_tag = data.get('tag_name')
             if latest_tag and latest_tag != CURRENT_VERSION:
-                logger.info("-" * 50)
-                logger.info(f"NEW UPDATE DETECTED! Latest: {latest_tag} (Current: {CURRENT_VERSION})")
-                logger.info(f"Download: {data.get('html_url', 'https://github.com/' + GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME)}")
-                logger.info("-" * 50)
+                # Force visibility for update detections regardless of debug_mode
+                print("-" * 50)
+                print(f"{Colors.BOLD}{Colors.MAGENTA}NEW UPDATE DETECTED!{Colors.RESET} Latest: {latest_tag} (Current: {CURRENT_VERSION})")
+                print(f"Download: {data.get('html_url', 'https://github.com/' + GITHUB_REPO_OWNER + '/' + GITHUB_REPO_NAME)}")
+                print("-" * 50)
             else:
-                logger.info("Patcher is up to date.")
+                logger.debug("Patcher is up to date.")
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
 
@@ -805,7 +822,8 @@ signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0))
 def main():
     install_exit_handler()
     
-    logger.info(f"Patcher {CURRENT_VERSION} ({BUILD_TYPE}) starting up...")
+    # Force visibility for startup info
+    print(f"{Colors.CYAN}{Colors.BOLD}VRCYTProxy Patcher {CURRENT_VERSION}{Colors.RESET} ({BUILD_TYPE}) starting up...")
     check_for_updates()
     
     try:
@@ -860,14 +878,20 @@ def main():
 
             # 2. Proactive File Watch
             if now - last_file_watch_time > 1.0:
-                # If we aren't in a public/group world, we enable the patch.
-                # idle/no_logs states also keep it enabled to be ready for next launch.
-                should_disable = monitor.last_instance_type in ['public', 'group_public']
-                desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
+                force_public = CONFIG.get("force_patch_in_public", False)
+                
+                if force_public:
+                    desired_state = PatchState.ENABLED
+                else:
+                    # If we aren't in a public/group world, we enable the patch.
+                    # idle/no_logs states also keep it enabled to be ready for next launch.
+                    should_disable = monitor.last_instance_type in ['public', 'group_public']
+                    desired_state = PatchState.DISABLED if should_disable else PatchState.ENABLED
+                
                 current_state = get_patch_state()
                 
                 if desired_state == PatchState.ENABLED and current_state == PatchState.DISABLED:
-                    logger.info("Re-applying wrapper based on log state...")
+                    logger.info("Applying wrapper based on log/config state...")
                     enable_patch(WRAPPER_FILE_LIST, False)
                 elif desired_state == PatchState.DISABLED and current_state == PatchState.ENABLED:
                     logger.info("World changed to PUBLIC (via log). Restoring original yt-dlp.exe...")

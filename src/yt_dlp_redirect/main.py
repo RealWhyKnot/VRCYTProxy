@@ -42,26 +42,64 @@ DENO_PATH = os.path.join(APP_BASE_PATH, DENO_FILENAME)
 DEFAULT_CONFIG = {
     "remote_server": "https://whyknot.dev",
     "proxy_all": False,
-    "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"]
+    "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"],
+    "video_error_patterns": [
+        "[Video Player] Failed to load",
+        "VideoError",
+        "[AVProVideo] Error",
+        "[VideoTXL] Error",
+        "Loading failed"
+    ],
+    "instance_patterns": {
+        "invite": "~private",
+        "friends+": "~hidden",
+        "friends": "~friends",
+        "group_public": "groupAccessType(public)",
+        "group_plus": "groupAccessType(plus)",
+        "group": "~group"
+    },
+    "proxy_domain": "whyknot.dev",
+    "vrchat_log_dir": os.path.join(os.environ.get('USERPROFILE', ''), 'AppData', 'LocalLow', 'VRChat', 'VRChat')
 }
 
 def load_config():
+    needs_save = False
+    config = DEFAULT_CONFIG.copy()
+    
     if os.path.exists(WRAPPER_CONFIG_PATH):
         try:
             with open(WRAPPER_CONFIG_PATH, 'r') as f:
                 user_config = json.load(f)
-                config = DEFAULT_CONFIG.copy()
-                config.update(user_config)
-                return config
+                
+                # Check for type mismatch (e.g. if file is just "null" or empty string)
+                if not isinstance(user_config, dict):
+                    raise ValueError("Config must be a JSON object")
+                    
+                # Ensure all default keys exist
+                for k, v in DEFAULT_CONFIG.items():
+                    if k not in user_config:
+                        user_config[k] = v
+                        needs_save = True
+                config = user_config
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Config file is invalid or corrupted: {e}. Regenerating with defaults...")
+            config = DEFAULT_CONFIG.copy()
+            needs_save = True
         except Exception as e:
-            logger.error(f"Failed to load config: {e}")
-    
-    # Save default config if not exists
-    try:
-        with open(WRAPPER_CONFIG_PATH, 'w') as f:
-            json.dump(DEFAULT_CONFIG, f, indent=4)
-    except: pass
-    return DEFAULT_CONFIG
+            logger.error(f"Unexpected error loading config: {e}. Using defaults.")
+            config = DEFAULT_CONFIG.copy()
+    else:
+        needs_save = True
+
+    if needs_save:
+        try:
+            with open(WRAPPER_CONFIG_PATH, 'w') as f:
+                json.dump(config, f, indent=4)
+            logger.info(f"Configuration file updated/regenerated at {WRAPPER_CONFIG_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
+            
+    return config
 
 CONFIG = load_config()
 REMOTE_SERVER_BASE = CONFIG.get("remote_server", "https://whyknot.dev")

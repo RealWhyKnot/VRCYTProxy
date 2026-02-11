@@ -161,9 +161,7 @@ def load_config(config_path):
             "VideoError", 
             "[AVProVideo] Error", 
             "[VideoTXL] Error", 
-            "Loading failed",
-            "PlayerError",
-            "RateLimited"
+            "Loading failed"
         ],
         "instance_patterns": {
             "invite": "~private",
@@ -175,16 +173,25 @@ def load_config(config_path):
         },
         "proxy_domain": "whyknot.dev"
     }
+    config = defaults.copy()
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r', encoding='utf-8-sig') as f:
-                config = json.load(f)
+                user_config = json.load(f)
+                if not isinstance(user_config, dict):
+                    raise ValueError("Config must be a JSON object")
                 for k, v in defaults.items():
-                    if k not in config: config[k] = v
-                return config
+                    if k not in user_config:
+                        user_config[k] = v
+                config = user_config
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Failed to load config from {config_path}: {e}. Regenerating defaults...")
+            save_config(config_path, defaults)
         except Exception:
-            logger.error(f"Failed to load config from {config_path}", exc_info=True)
-    return defaults
+            logger.error(f"Unexpected error loading config from {config_path}", exc_info=True)
+    else:
+        save_config(config_path, defaults)
+    return config
 
 def save_config(config_path, config_data):
     try:

@@ -96,13 +96,19 @@ try {
     $NeedsYtdlp = $Force -or -not (Test-Path $YtdlpPath) -or ($PinnedVersions.ytdlp_hash -ne $LatestYtdlpHash)
 
     if ($NeedsDeno) {
-        Write-Host "Updating Deno to $LatestDenoVer..." -ForegroundColor Cyan
+        Write-Host "Deno update needed (Current: '$($PinnedVersions.deno)', Latest: '$LatestDenoVer')..." -ForegroundColor Cyan
         Invoke-WebRequest "https://github.com/denoland/deno/releases/download/$LatestDenoVer/deno-x86_64-pc-windows-msvc.zip" -OutFile (Join-Path $VendorDir "deno.zip")
         Expand-Archive (Join-Path $VendorDir "deno.zip") -DestinationPath $VendorDir -Force
         Remove-Item (Join-Path $VendorDir "deno.zip")
-        Write-Host "Deno updated."
+        Write-Host "Deno updated to $LatestDenoVer."
     } else {
-        Write-Host "Deno is up to date ($LatestDenoVer)."
+        Write-Host "Deno is up to date ($LatestDenoVer)." -ForegroundColor Gray
+    }
+
+    if ($NeedsYtdlp) {
+        Write-Host "yt-dlp update needed (Current: '$($PinnedVersions.ytdlp_hash)', Latest: '$LatestYtdlpHash')..." -ForegroundColor Cyan
+    } else {
+        Write-Host "yt-dlp is up to date ($($LatestYtdlpHash.Substring(0,7)))." -ForegroundColor Gray
     }
 
     Write-Host "[1/6] Setting up fresh Conda environment..." -ForegroundColor Green

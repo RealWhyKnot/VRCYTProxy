@@ -161,7 +161,9 @@ def load_config(config_path):
             "VideoError", 
             "[AVProVideo] Error", 
             "[VideoTXL] Error", 
-            "Loading failed"
+            "Loading failed",
+            "PlayerError",
+            "RateLimited"
         ],
         "instance_patterns": {
             "invite": "~private",

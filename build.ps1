@@ -186,26 +186,25 @@ try {
     if ($NeedsYtdlp) {
         Write-Host "   -> Building standalone yt-dlp (Latest Master: $($LatestYtdlpHash.Substring(0,7)))..." -ForegroundColor Cyan
         
-                $YtDlpBuildArgs = @(
+        # We need to ensure we build from the source we just installed via pip
+        # yt-dlp master branch build requirements
+        $YtDlpBuildArgs = @(
+            "--noconfirm",
+            "--onefile",
+            "--name", "yt-dlp-latest",
+            "--distpath", $VendorDir,
+            "--collect-all", "yt_dlp"
+        )
+
+        if ($IconArg) { $YtDlpBuildArgs += $IconArg }
+
+        # Find the actual path to yt_dlp source from pip
+        $YtPkgInfo = & $VenvPython -m pip show yt-dlp
+        $YtLocation = ($YtPkgInfo | Select-String "Location:").ToString().Split(" ")[1].Trim()
+        $YtMain = Join-Path $YtLocation "yt_dlp\__main__.py"
         
-                    "--noconfirm",
-        
-                    "--onefile",
-        
-                    "--name", "yt-dlp-latest",
-        
-                    "--distpath", $VendorDir
-        
-                )
-        
-                if ($IconArg) { $YtDlpBuildArgs += $IconArg }
-        
-                # Build yt-dlp using its internal entry point
-        
-        
-        $YtMain = & $VenvPython -c "import yt_dlp, os; print(os.path.join(os.path.dirname(yt_dlp.__file__), '__main__.py'))"
         Write-Host "   -> Entry Point: $YtMain"
-        & $CondaCmd run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs --collect-all yt_dlp --hidden-import "yt_dlp.utils._utils" --hidden-import "yt_dlp.extractor.lazy_extractors" $YtMain
+        & $CondaCmd run -n $CondaEnvName python -m PyInstaller @YtDlpBuildArgs $YtMain
         Write-Host "   -> yt-dlp build complete."
     } else {
         Write-Host "   -> yt-dlp is up to date. Using existing binary." -ForegroundColor Gray

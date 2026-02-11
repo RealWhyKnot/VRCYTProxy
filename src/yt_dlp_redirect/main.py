@@ -33,10 +33,38 @@ def get_application_path():
 APP_BASE_PATH = get_application_path()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 WRAPPER_STATE_PATH = os.path.join(APP_BASE_PATH, 'wrapper_state.json')
+WRAPPER_CONFIG_PATH = os.path.join(APP_BASE_PATH, 'wrapper_config.json')
 
 LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
 DENO_PATH = os.path.join(APP_BASE_PATH, DENO_FILENAME)
+
+DEFAULT_CONFIG = {
+    "remote_server": "https://whyknot.dev",
+    "proxy_all": False,
+    "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"]
+}
+
+def load_config():
+    if os.path.exists(WRAPPER_CONFIG_PATH):
+        try:
+            with open(WRAPPER_CONFIG_PATH, 'r') as f:
+                user_config = json.load(f)
+                config = DEFAULT_CONFIG.copy()
+                config.update(user_config)
+                return config
+        except Exception as e:
+            logger.error(f"Failed to load config: {e}")
+    
+    # Save default config if not exists
+    try:
+        with open(WRAPPER_CONFIG_PATH, 'w') as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+    except: pass
+    return DEFAULT_CONFIG
+
+CONFIG = load_config()
+REMOTE_SERVER_BASE = CONFIG.get("remote_server", "https://whyknot.dev")
 
 def setup_logging():
     logger = logging.getLogger('RedirectWrapper')
@@ -177,6 +205,7 @@ def process_and_execute(incoming_args):
     logger.info(f"URL found in arguments: {target_url}")
 
     # Check for fallback state
+    current_time = time.time()
     if os.path.exists(WRAPPER_STATE_PATH):
         try:
             with open(WRAPPER_STATE_PATH, 'r') as f:
@@ -185,21 +214,44 @@ def process_and_execute(incoming_args):
                 # Global fallback
                 if state.get('force_fallback', False):
                     fallback_until = state.get('fallback_until', 0)
-                    if time.time() < fallback_until:
+                    if current_time < fallback_until:
                         logger.warning(f"Global Fallback mode active. Disabling Tier 1 (Proxy).")
                         proxy_disabled = True
                 
-                # Per-URL fallback/escalation
-                if target_url and 'failed_urls' in state:
-                    failed_info = state['failed_urls'].get(target_url)
-                    if failed_info and time.time() < failed_info.get('expiry', 0):
-                        failed_tier = failed_info.get('tier', 0)
-                        forced_tier = failed_tier + 1
-                        logger.warning(f"URL previously failed at Tier {failed_tier}. Escalating to Tier {forced_tier}.")
-                        if forced_tier >= 1: proxy_disabled = True
+                # Per-URL fallback/escalation and back-to-back detection
+                if target_url:
+                    if 'failed_urls' not in state: state['failed_urls'] = {}
+                    
+                    failed_info = state['failed_urls'].get(target_url, {})
+                    last_req = failed_info.get('last_request_time', 0)
+                    
+                    # DETECTION LOGIC: If called again within 15s, assume playback failure
+                    if current_time - last_req < 15:
+                        # Increment tier based on previous failure or just start escalating
+                        current_tier = failed_info.get('tier', 0)
+                        forced_tier = current_tier + 1
+                        logger.warning(f"Back-to-back request detected for {target_url} (Interval: {current_time - last_req:.2f}s). Escalating to Tier {forced_tier}.")
+                    else:
+                        # Normal request, but might still have a persistent failure tier
+                        if current_time < failed_info.get('expiry', 0):
+                            forced_tier = failed_info.get('tier', 0)
+                            if forced_tier > 0:
+                                logger.warning(f"URL previously failed at Tier {forced_tier-1}. Escalating to Tier {forced_tier}.")
+
+                    # Update state with current request info
+                    failed_info['last_request_time'] = current_time
+                    failed_info['tier'] = forced_tier
+                    # Keep the failure/escalation "remembered" for 5 minutes
+                    failed_info['expiry'] = current_time + 300
+                    state['failed_urls'][target_url] = failed_info
+                    
+                    with open(WRAPPER_STATE_PATH, 'w') as f:
+                        json.dump(state, f)
+                    
+                    if forced_tier >= 1: proxy_disabled = True
 
         except Exception as e:
-            logger.error(f"Failed to read wrapper state: {e}")
+            logger.error(f"Failed to read/update wrapper state: {e}")
 
     # Health check the proxy if not already disabled
     if not proxy_disabled:
@@ -216,21 +268,50 @@ def process_and_execute(incoming_args):
 
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
     
-    # Expand proxied domains: YouTube, Twitch, VRCDN
-    proxy_patterns = r'youtube\.com|youtu\.be|twitch\.tv|vrcdn\.live|vrcdn\.video'
-    should_proxy = target_url and not is_already_proxied and re.search(proxy_patterns, target_url, re.IGNORECASE)
+    # Expand proxied domains based on config
+    proxy_all = CONFIG.get("proxy_all", False)
+    proxy_domains = CONFIG.get("proxy_domains", [])
+    
+    should_proxy = False
+    if target_url and not is_already_proxied:
+        if proxy_all:
+            should_proxy = True
+        else:
+            domain_pattern = "|".join([re.escape(d) for d in proxy_domains])
+            if domain_pattern and re.search(domain_pattern, target_url, re.IGNORECASE):
+                should_proxy = True
     
     logger.info(f"Analysis: Should Proxy? {bool(should_proxy)}. Is already proxied? {is_already_proxied}. Proxy Disabled? {proxy_disabled}. Forced Tier: {forced_tier}")
 
     if should_proxy and not proxy_disabled and forced_tier < 1:
-        logger.info(f"Tier 1: Proxyable URL detected ({target_url}). Returning proxied URL directly.")
-        encoded_url = quote_plus(target_url)
-        new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
+        logger.info(f"Tier 1: Proxyable URL detected ({target_url}). Resolving via server...")
         
-        logger.info(f"Rewriting URL to: {new_url}")
-        update_wrapper_success()
-        safe_print(new_url)
-        return 0 
+        try:
+            # Use the more powerful /api/stream/resolve endpoint
+            # Find video type in args
+            video_type = "va"
+            for i, arg in enumerate(incoming_args):
+                if arg == "--format" and i + 1 < len(incoming_args):
+                    if "bestvideo" in incoming_args[i+1] and "bestaudio" not in incoming_args[i+1]:
+                        video_type = "v"
+                    elif "bestaudio" in incoming_args[i+1] and "bestvideo" not in incoming_args[i+1]:
+                        video_type = "a"
+
+            resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
+            req = urllib.request.Request(resolve_url, method='GET')
+            
+            with urllib.request.urlopen(req, timeout=5.0) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode())
+                    new_url = data.get("stream_url")
+                    if new_url:
+                        logger.info(f"Tier 1 success. Resolved to: {new_url}")
+                        update_wrapper_success()
+                        safe_print(new_url)
+                        return 0
+        except Exception as e:
+            logger.error(f"Tier 1 resolution failed: {e}")
+            # Fall through to Tier 2
 
     if is_already_proxied and not proxy_disabled and forced_tier < 1:
         logger.info("Tier 1: URL is already proxied. Passing through directly.")
@@ -307,9 +388,23 @@ def process_and_execute(incoming_args):
         # as long as it's not already a proxy URL and proxy isn't globally dead.
         if not is_already_proxied and not proxy_disabled and target_url:
             logger.info("CRITICAL FALLBACK: Tier 3 failed. Attempting Tier 1 (Proxy) as absolute last resort.")
+            try:
+                resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}"
+                req = urllib.request.Request(resolve_url, method='GET')
+                with urllib.request.urlopen(req, timeout=5.0) as response:
+                    if response.status == 200:
+                        data = json.loads(response.read().decode())
+                        new_url = data.get("stream_url")
+                        if new_url:
+                            logger.info(f"Last resort resolution success: {new_url}")
+                            safe_print(new_url)
+                            return 0
+            except: pass
+            
+            # If API fails, fall back to the old redirect style as a literal last resort
             encoded_url = quote_plus(target_url)
             new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
-            logger.info(f"Last resort rewrite: {new_url}")
+            logger.info(f"Last resort direct rewrite: {new_url}")
             safe_print(new_url)
             return 0
 

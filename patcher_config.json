@@ -1,0 +1,22 @@
+{
+  "video_error_patterns": [
+    "[Video Player] Failed to load",
+    "VideoError",
+    "[AVProVideo] Error",
+    "[VideoTXL] Error",
+    "Loading failed"
+  ],
+  "instance_patterns": {
+    "invite": "~private",
+    "friends+": "~hidden",
+    "friends": "~friends",
+    "group_public": "groupAccessType(public)",
+    "group_plus": "groupAccessType(plus)",
+    "group": "~group"
+  },
+  "proxy_domain": "whyknot.dev",
+  "debug_mode": true,
+  "force_patch_in_public": false,
+  "auto_update_check": true,
+  "vrchat_log_dir": "C:\\Users\\ADMIN\\AppData\\LocalLow\\VRChat\\VRChat"
+}

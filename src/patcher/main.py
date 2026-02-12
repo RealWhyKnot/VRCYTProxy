@@ -24,7 +24,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.01.19.dev-main-fb2d4aa"
+    CURRENT_VERSION = "v2026.02.11.dev-main-c4281b8"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -133,6 +133,14 @@ LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
 SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
 
+def save_config(config_path, config_data):
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2)
+    except Exception:
+        # We don't have a logger yet during early config load
+        sys.stderr.write(f"Failed to save config to {config_path}\n")
+
 def load_config(config_path):
     defaults = {
         "video_error_patterns": [
@@ -151,6 +159,8 @@ def load_config(config_path):
             "group": "~group"
         },
         "proxy_domain": "whyknot.dev",
+        "always_proxy": False,
+        "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"],
         "debug_mode": BUILD_TYPE == "DEV",
         "force_patch_in_public": False,
         "auto_update_check": True
@@ -163,7 +173,11 @@ def load_config(config_path):
                 if not isinstance(user_config, dict):
                     raise ValueError("Config must be a JSON object")
                 
-                needs_save = False
+                # MIGRATION: Rename proxy_all to always_proxy if found
+                if "proxy_all" in user_config:
+                    user_config["always_proxy"] = user_config.pop("proxy_all")
+                    needs_save = True
+
                 for k, v in defaults.items():
                     if k not in user_config:
                         user_config[k] = v
@@ -171,10 +185,11 @@ def load_config(config_path):
                 config = user_config
                 if needs_save: save_config(config_path, config)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Failed to load config from {config_path}: {e}. Regenerating defaults...")
+            # We don't have logger yet
+            sys.stderr.write(f"Failed to load config from {config_path}: {e}. Regenerating defaults...\n")
             save_config(config_path, defaults)
         except Exception:
-            logger.error(f"Unexpected error loading config from {config_path}", exc_info=True)
+            sys.stderr.write(f"Unexpected error loading config from {config_path}\n")
     else:
         save_config(config_path, defaults)
     return config
@@ -206,13 +221,6 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
-
-def save_config(config_path, config_data):
-    try:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config_data, f, indent=2)
-    except Exception:
-        logger.error(f"Failed to save config to {config_path}", exc_info=True)
 
 def get_platform_default_paths():
     return [os.path.join(os.path.expanduser('~'), 'AppData', 'LocalLow', 'VRChat', 'VRChat')]

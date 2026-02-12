@@ -10,34 +10,21 @@ import time
 import urllib.request
 import urllib.error
 from urllib.parse import quote_plus
-from logging import FileHandler
 
-if platform.system() != 'Windows':
-    print("FATAL: This wrapper is designed to run on Windows only.", file=sys.stderr)
-    sys.exit(1)
-
-REMOTE_SERVER_BASE = "https://whyknot.dev"
-
-LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe"
-DENO_FILENAME = "deno.exe"
-
+# --- Constants ---
+WRAPPER_NAME = "yt-dlp-wrapper"
+WRAPPER_VERSION = "v2026.02.12.dev-main-9fe7379" # Updated by build script
+LOG_FILE_NAME = "wrapper.log"
+CONFIG_FILE_NAME = "patcher_config.json"
+WRAPPER_STATE_NAME = "wrapper_state.json"
 ORIGINAL_YTDLP_FILENAME = "yt-dlp-og.exe"
+LATEST_YTDLP_FILENAME = "yt-dlp-latest.exe"
 
-LOG_FILE_NAME = 'wrapper_debug.log'
-
-def get_application_path():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-APP_BASE_PATH = get_application_path()
-LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
-WRAPPER_STATE_PATH = os.path.join(APP_BASE_PATH, 'wrapper_state.json')
-WRAPPER_CONFIG_PATH = os.path.join(APP_BASE_PATH, 'wrapper_config.json')
-
-LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
+APP_BASE_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 ORIGINAL_YTDLP_PATH = os.path.join(APP_BASE_PATH, ORIGINAL_YTDLP_FILENAME)
-DENO_PATH = os.path.join(APP_BASE_PATH, DENO_FILENAME)
+LATEST_YTDLP_PATH = os.path.join(APP_BASE_PATH, LATEST_YTDLP_FILENAME)
+CONFIG_PATH = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
+WRAPPER_STATE_PATH = os.path.join(APP_BASE_PATH, WRAPPER_STATE_NAME)
 
 IS_DEV_BUILD = not getattr(sys, 'frozen', False)
 
@@ -48,147 +35,116 @@ DEFAULT_CONFIG = {
     "video_error_patterns": [
         "[Video Player] Failed to load",
         "VideoError",
-        "[AVProVideo] Error",
-        "[VideoTXL] Error",
-        "Loading failed"
+        "Error loading video",
+        "Failed to resolve"
     ],
-    "instance_patterns": {
-        "invite": "~private",
-        "friends+": "~hidden",
-        "friends": "~friends",
-        "group_public": "groupAccessType(public)",
-        "group_plus": "groupAccessType(plus)",
-        "group": "~group"
-    },
-    "proxy_domain": "whyknot.dev",
-    "vrchat_log_dir": os.path.join(os.environ.get('USERPROFILE', ''), 'AppData', 'LocalLow', 'VRChat', 'VRChat'),
-    "debug_mode": IS_DEV_BUILD,
-    "failure_retry_window": 15,
-    "resolution_timeout": 5.0,
     "preferred_max_height": 1080,
-    "enable_tier1_proxy": True,
-    "enable_tier2_local": True,
-    "enable_tier3_native": True,
-    "custom_user_agent": None,
-    "force_patch_in_public": False
+    "resolution_timeout": 5.0,
+    "failure_retry_window": 15,
+    "custom_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def load_config():
-    needs_save = False
-    config = DEFAULT_CONFIG.copy()
+# --- Global State ---
+CONFIG = DEFAULT_CONFIG
+
+# --- Logging Setup ---
+def setup_logging():
+    log_file = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
     
-    if os.path.exists(WRAPPER_CONFIG_PATH):
+    # Rotate log if it's too big (1MB)
+    if os.path.exists(log_file) and os.path.getsize(log_file) > 1024 * 1024:
+        try: os.remove(log_file)
+        except: pass
+
+    logging.basicConfig(
+        level=logging.DEBUG if IS_DEV_BUILD else logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+        ]
+    )
+    return logging.getLogger(WRAPPER_NAME)
+
+logger = setup_logging()
+
+# --- Config Handling ---
+def load_config():
+    global CONFIG
+    if os.path.exists(CONFIG_PATH):
         try:
-            with open(WRAPPER_CONFIG_PATH, 'r') as f:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
-                
+                needs_save = False
+
                 if not isinstance(user_config, dict):
                     raise ValueError("Config must be a JSON object")
-                
+
                 # MIGRATION: Rename proxy_all to always_proxy if found
                 if "proxy_all" in user_config:
                     user_config["always_proxy"] = user_config.pop("proxy_all")
                     needs_save = True
-                    
+
                 # Merge and detect if we need to save missing keys
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in user_config:
                         user_config[k] = v
                         needs_save = True
-                
-                config = user_config
-        except (json.JSONDecodeError, ValueError) as e:
-            sys.stderr.write(f"Config file is invalid or corrupted: {e}. Regenerating defaults...\n")
-            needs_save = True
-        except Exception as e:
-            sys.stderr.write(f"Unexpected error loading config: {e}. Using defaults.\n")
-    else:
-        needs_save = True
 
-    if needs_save:
-        try:
-            with open(WRAPPER_CONFIG_PATH, 'w') as f:
-                json.dump(config, f, indent=4)
+                config = user_config
+                if needs_save:
+                    with open(CONFIG_PATH, 'w', encoding='utf-8') as wf:
+                        json.dump(config, wf, indent=2)
+                return config
+        except (json.JSONDecodeError, ValueError) as e:
+            sys.stderr.write(f"Config file is invalid or corrupted: {e}. Regenerating defaults...\n")    
+            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2)
         except Exception as e:
-            sys.stderr.write(f"Failed to save config: {e}\n")
-            
-    return config
+            sys.stderr.write(f"Unexpected error loading config: {e}\n")
+    return DEFAULT_CONFIG
 
 CONFIG = load_config()
-REMOTE_SERVER_BASE = CONFIG.get("remote_server", "https://whyknot.dev")
 
-def setup_logging():
-    logger = logging.getLogger('RedirectWrapper')
-    
-    # Logic: If debug_mode is True, log everything (DEBUG). 
-    # If False, log only ERROR and above.
-    is_debug = CONFIG.get("debug_mode", False)
-    level = logging.DEBUG if is_debug else logging.ERROR
-    logger.setLevel(level)
-    
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
+# --- Utilities ---
+def safe_print(msg):
+    """Ensures output is written to stdout cleanly."""
     try:
-        # Append mode for logs
-        handler = FileHandler(LOG_FILE_PATH, mode='a', encoding='utf-8')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-    except Exception as e:
-        sys.stderr.write(f"FATAL: Could not set up file logging: {e}\n")
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        
-    return logger
+        sys.stdout.write(msg + '\n')
+        sys.stdout.flush()
+    except Exception:
+        pass
 
-logger = setup_logging()
-
-def safe_print(text):
-    try:
-        print(text, flush=True)
-    except OSError as e:
-        logger.error(f"Failed to print to stdout (VRChat pipe likely closed): {e}")
-
-def update_wrapper_success():
-    try:
-        if os.path.exists(WRAPPER_STATE_PATH):
-            with open(WRAPPER_STATE_PATH, 'r') as f:
-                state = json.load(f)
-            if state.get('consecutive_errors', 0) > 0 or state.get('force_fallback', False):
-                state['consecutive_errors'] = 0
-                state['force_fallback'] = False
-                with open(WRAPPER_STATE_PATH, 'w') as f:
-                    json.dump(state, f)
-                logger.info("Successfully reset proxy error state.")
-    except Exception: pass
-
-def check_proxy_online():
-    try:
-        logger.info(f"Checking if proxy is online: {REMOTE_SERVER_BASE}")
-        req = urllib.request.Request(REMOTE_SERVER_BASE, method='HEAD')
-        with urllib.request.urlopen(req, timeout=2.0) as response:
-            return response.status == 200
-    except urllib.error.HTTPError as e:
-        if e.code >= 500:
-            logger.error(f"Proxy Server Error (5xx): {e.code}. This will trigger immediate fallback.")
-        else:
-            logger.warning(f"Proxy returned HTTP Error: {e.code}")
-        return False
-    except Exception as e:
-        logger.warning(f"Proxy health check failed: {e}")
-        return False
-
-def find_url_in_args(args_list):
-    for arg in args_list:
-        if arg.startswith('http'):
-            return arg
+def find_url_in_args(args):
+    """Simple regex based URL finder in arguments."""
+    url_pattern = re.compile(r'https?://[^\s<>"+]+|www\.[^\s<>"+]+')
+    for arg in args:
+        match = url_pattern.search(arg)
+        if match:
+            return match.group(0)
     return None
 
-def attempt_executable(executable_path, executable_name, incoming_args, use_custom_temp_dir=False):
-    
+def check_proxy_online():
+    """Fast check to see if our remote server is up."""
+    try:
+        url = CONFIG.get("remote_server", "https://whyknot.dev") + "/api/status/ping"
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            return response.status == 200
+    except:
+        return False
+
+def update_wrapper_success():
+    """Clears persistent failure flags for this URL in state."""
+    # Logic moved to patcher for robustness, but here for local state if needed
+    pass
+
+# --- Core Logic ---
+def attempt_executable(executable_path, executable_name, incoming_args, use_custom_temp_dir=False, log_level=logging.INFO, log_prefix="YT-DLP"):
+    """
+    Executes a subprocess and captures/logs output in real-time.
+    """
     if not os.path.exists(executable_path):
-        logger.error(f"Executable '{executable_name}' not found at '{executable_path}'.")
-        return None, -1
+        logger.error(f"Executable not found: {executable_path}")
+        return None, 1
 
     sanitized_args = [str(arg).replace('\0', '') for arg in incoming_args]
     command = [executable_path] + sanitized_args
@@ -196,107 +152,110 @@ def attempt_executable(executable_path, executable_name, incoming_args, use_cust
     # Enhanced Debug Logging: Command + Environment
     logger.debug(f"Launching Executable: {executable_name}")
     logger.debug(f"Full Command: {subprocess.list2cmdline(command)}")
-    
+
     process_env = os.environ.copy()
-    
+
     if use_custom_temp_dir:
         process_env['TEMP'] = APP_BASE_PATH
         process_env['TMP'] = APP_BASE_PATH
         logger.debug(f"Env: TEMP/TMP set to: {APP_BASE_PATH}")
-    
+
     try:
         creation_flags = 0
         if platform.system() == 'Windows':
-            creation_flags = 0x08000000 # CREATE_NO_WINDOW
+            creation_flags = subprocess.CREATE_NO_WINDOW
 
         process = subprocess.Popen(
-            command, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE, 
-            text=True, 
-            encoding='utf-8', 
-            errors='replace',
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=process_env,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace',
             creationflags=creation_flags
         )
-    except OSError as e:
-        logger.error(f"Failed to launch executable '{executable_name}': {e}")
-        return None, -1
+        
+        stdout_lines = []
+        stderr_lines = []
 
-    stdout_lines = []
-    stderr_lines = []
+        def reader(stream, output_list):
+            try:
+                for line in iter(stream.readline, ''):
+                    stripped_line = line.strip()
+                    # Pass through the output to the logger
+                    logger.log(log_level, f"[{log_prefix}] {stripped_line}")
+                    output_list.append(stripped_line)
+            except Exception as e:
+                logger.debug(f"Reader error: {e}")
 
-    def log_stream(stream, log_level, log_prefix, output_list):
-        try:
-            for line in iter(stream.readline, ''):
-                stripped_line = line.strip()
-                # Pass through the output to the logger
-                logger.log(log_level, f"[{log_prefix}] {stripped_line}")
-                output_list.append(stripped_line)
-        except Exception as e:
-            logger.error(f"Error reading stream from {log_prefix}: {e}")
-        finally:
-            stream.close()
+        stdout_thread = threading.Thread(target=reader, args=(process.stdout, stdout_lines))
+        stderr_thread = threading.Thread(target=reader, args=(process.stderr, stderr_lines))
+        
+        stdout_thread.start()
+        stderr_thread.start()
 
-    stdout_thread = threading.Thread(target=log_stream, args=(process.stdout, logging.INFO, f"{executable_name}-stdout", stdout_lines))
-    stderr_thread = threading.Thread(target=log_stream, args=(process.stderr, logging.ERROR, f"{executable_name}-stderr", stderr_lines))
-    
-    stdout_thread.start()
-    stderr_thread.start()
-    
-    return_code = process.wait()
-    stdout_thread.join()
-    stderr_thread.join()
-    
-    logger.debug(f"Process '{executable_name}' exited with code {return_code}.")
-    
-    final_url_output = ""
-    for line in reversed(stdout_lines):
-        if line:
-            final_url_output = line
-            break
-            
-    return final_url_output, return_code
+        return_code = process.wait()
+        
+        stdout_thread.join()
+        stderr_thread.join()
+
+        logger.debug(f"Process '{executable_name}' exited with code {return_code}.")
+
+        final_url_output = ""
+        for line in reversed(stdout_lines):
+            if line.startswith('http'):
+                final_url_output = line
+                break
+        
+        return final_url_output, return_code
+
+    except Exception as e:
+        logger.error(f"Execution failed: {e}", exc_info=True)
+        return None, 1
 
 def process_and_execute(incoming_args):
-    proxy_disabled = False
-    forced_tier = 0 # 0 = Normal, 1 = Skip Tier 1, 2 = Skip Tier 1&2
+    """3-Tier fallback logic."""
+    logger.info(f"--- {WRAPPER_NAME} {WRAPPER_VERSION} ---")
     
+    current_time = time.time()
+    proxy_disabled = False
+    t1_enabled = True
+    t2_enabled = True
+    t3_enabled = True
+    forced_tier = 0 # 0 = Normal, 1 = Skip Tier 1, 2 = Skip Tier 1&2
+
     target_url = find_url_in_args(incoming_args)
     logger.debug(f"Targeting URL: {target_url}")
 
     # Configuration Checks
     retry_window = CONFIG.get("failure_retry_window", 15)
-    t1_enabled = CONFIG.get("enable_tier1_proxy", True)
-    t2_enabled = CONFIG.get("enable_tier2_local", True)
-    t3_enabled = CONFIG.get("enable_tier3_native", True)
-
-    # Check for fallback state
-    current_time = time.time()
-    if os.path.exists(WRAPPER_STATE_PATH):
+    
+    if target_url:
         try:
-            with open(WRAPPER_STATE_PATH, 'r') as f:
-                state = json.load(f)
+            if os.path.exists(WRAPPER_STATE_PATH):
+                with open(WRAPPER_STATE_PATH, 'r') as f:
+                    state = json.load(f)
                 
-                # Global fallback
+                # Check for Global Fallback mode
                 if state.get('force_fallback', False):
                     fallback_until = state.get('fallback_until', 0)
                     if current_time < fallback_until:
                         logger.warning(f"GLOBAL FALLBACK ACTIVE. Disabling Tier 1.")
                         proxy_disabled = True
-                
+
                 # Per-URL fallback/escalation and back-to-back detection
-                if target_url:
-                    if 'failed_urls' not in state: state['failed_urls'] = {}
-                    
-                    failed_info = state['failed_urls'].get(target_url, {})
+                failed_urls = state.get('failed_urls', {})
+                if target_url in failed_urls:
+                    failed_info = failed_urls[target_url]
                     last_req = failed_info.get('last_request_time', 0)
-                    
-                    # DETECTION LOGIC: If called again within the window, assume playback failure
+                    current_tier = failed_info.get('tier', 0)
+
+                    # DETECTION LOGIC: If called again within the window, assume playback failure        
                     if current_time - last_req < retry_window:
                         current_tier = failed_info.get('tier', 0)
                         forced_tier = current_tier + 1
-                        logger.warning(f"RAPID RETRY DETECTED (Δ{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
+                        logger.warning(f"RAPID RETRY DETECTED (\u0394{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
                     else:
                         if current_time < failed_info.get('expiry', 0):
                             forced_tier = failed_info.get('tier', 0)
@@ -308,7 +267,7 @@ def process_and_execute(incoming_args):
                     failed_info['tier'] = forced_tier
                     failed_info['expiry'] = current_time + 300
                     state['failed_urls'][target_url] = failed_info
-                    
+
                     with open(WRAPPER_STATE_PATH, 'w') as f:
                         json.dump(state, f)
                     
@@ -330,14 +289,15 @@ def process_and_execute(incoming_args):
             safe_print(final_output)
         return return_code
 
+    REMOTE_SERVER_BASE = CONFIG.get("remote_server", "https://whyknot.dev")
     is_already_proxied = target_url and target_url.startswith(REMOTE_SERVER_BASE)
-    
+
     # Expand proxied domains based on config
     always_proxy = CONFIG.get("always_proxy", False)
     proxy_domains = CONFIG.get("proxy_domains", [])
     res_timeout = CONFIG.get("resolution_timeout", 5.0)
     custom_ua = CONFIG.get("custom_user_agent")
-    
+
     should_proxy = False
     if target_url and not is_already_proxied and t1_enabled:
         if always_proxy:
@@ -346,21 +306,18 @@ def process_and_execute(incoming_args):
             domain_pattern = "|".join([re.escape(d) for d in proxy_domains])
             if domain_pattern and re.search(domain_pattern, target_url, re.IGNORECASE):
                 should_proxy = True
-    
+
     logger.debug(f"Decisions: should_proxy={should_proxy}, is_already_proxied={is_already_proxied}, forced_tier={forced_tier}")
 
     if should_proxy and not proxy_disabled and forced_tier < 1:
         logger.debug(f"Tier 1 [PROXY]: Resolving {target_url}...")
-        
+
         try:
             video_type = "va"
             for i, arg in enumerate(incoming_args):
                 if arg == "--format" and i + 1 < len(incoming_args):
-                    fmt_val = incoming_args[i+1]
-                    if "bestvideo" in fmt_val and "bestaudio" not in fmt_val:
-                        video_type = "v"
-                    elif "bestaudio" in fmt_val and "bestvideo" not in fmt_val:
-                        video_type = "a"
+                    if "bestaudio" in incoming_args[i+1]: video_type = "a"
+                    break
 
             resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
             if custom_ua:
@@ -368,7 +325,7 @@ def process_and_execute(incoming_args):
 
             logger.debug(f"API Request: {resolve_url}")
             req = urllib.request.Request(resolve_url, method='GET')
-            
+
             with urllib.request.urlopen(req, timeout=res_timeout) as response:
                 logger.debug(f"API Response Status: {response.status}")
                 if response.status == 200:
@@ -377,29 +334,31 @@ def process_and_execute(incoming_args):
                     data = json.loads(raw_data)
                     new_url = data.get("stream_url")
                     status = data.get("status", "ready")
-                    
+
                     if status == "failed":
-                        logger.error(f"TIER 1 FAILED: Server reported status 'failed'. Falling back.")
+                        logger.error(f"TIER 1 FAILED: Server reported status 'failed'. Falling back.")   
                     elif new_url:
                         if status == "downloading":
-                            logger.info(f"TIER 1: Video is downloading on server... Serving placeholder.")
-                        
-                        logger.debug(f"TIER 1 SUCCESS: {new_url} (Status: {status})")
-                        update_wrapper_success()
-                        safe_print(new_url)
-                        return 0
+                            logger.info(f"TIER 1: Video is currently processing on the server. Please wait 10-20 seconds and try again.")
+                            # Return 0 to stop the wrapper from falling back to Tier 2
+                            return 0
+                        else:
+                            logger.debug(f"TIER 1 SUCCESS: {new_url} (Status: {status})")
+                            update_wrapper_success()
+                            safe_print(new_url)
+                            return 0
         except Exception as e:
             logger.error(f"TIER 1 FAILED: {e}")
 
     if is_already_proxied and not proxy_disabled and forced_tier < 1:
         logger.debug("TIER 1 PASSTHROUGH: URL already proxied.")
         update_wrapper_success()
-        safe_print(target_url) 
+        safe_print(target_url)
         return 0
-    
+
     if forced_tier <= 1 and t2_enabled:
         logger.debug("Tier 2 [LOCAL LATEST]: Resolving...")
-        
+
         tier_2_args = []
         skip_next = False
         max_height = CONFIG.get("preferred_max_height", 1080)
@@ -409,7 +368,7 @@ def process_and_execute(incoming_args):
                 skip_next = False
                 continue
             if arg in ("--exp-allow", "--wild-allow"):
-                skip_next = True 
+                skip_next = True
                 continue
             tier_2_args.append(arg)
 
@@ -419,19 +378,14 @@ def process_and_execute(incoming_args):
         if "-f" not in tier_2_args and "--format" not in tier_2_args:
             tier_2_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
 
-        if custom_ua:
-            tier_2_args.extend(["--user-agent", custom_ua])
-
-        js_runtime_arg = f"deno:{DENO_PATH}"
-        tier_2_args.extend(["--js-runtimes", js_runtime_arg])
-
         resolved_url, return_code = attempt_executable(
-            LATEST_YTDLP_PATH, 
-            LATEST_YTDLP_FILENAME, 
-            tier_2_args, 
-            use_custom_temp_dir=True 
+            LATEST_YTDLP_PATH,
+            LATEST_YTDLP_FILENAME,
+            tier_2_args,
+            use_custom_temp_dir=True,
+            log_level=logging.DEBUG
         )
-        
+
         if return_code == 0 and resolved_url and resolved_url.startswith('http'):
             logger.debug(f"TIER 2 SUCCESS: {resolved_url}")
             safe_print(resolved_url)
@@ -444,7 +398,7 @@ def process_and_execute(incoming_args):
                         with open(WRAPPER_STATE_PATH, 'r') as f:
                             state = json.load(f)
                         if 'failed_urls' not in state: state['failed_urls'] = {}
-                        state['failed_urls'][target_url] = {'expiry': time.time() + 300, 'tier': 2}
+                        state['failed_urls'][target_url] = {'expiry': time.time() + 300, 'tier': 2}      
                         with open(WRAPPER_STATE_PATH, 'w') as f:
                             json.dump(state, f)
                 except: pass
@@ -452,18 +406,19 @@ def process_and_execute(incoming_args):
     if t3_enabled:
         logger.debug("Tier 3 [NATIVE]: Resolving...")
         final_output, return_code = attempt_executable(
-            ORIGINAL_YTDLP_PATH, 
-            ORIGINAL_YTDLP_FILENAME, 
-            incoming_args 
+            ORIGINAL_YTDLP_PATH,
+            ORIGINAL_YTDLP_FILENAME,
+            incoming_args,
+            log_level=logging.DEBUG
         )
-        
+
         if return_code == 0 and final_output:
             logger.debug(f"TIER 3 SUCCESS: {final_output}")
             safe_print(final_output)
             return 0
         else:
             logger.warning(f"TIER 3 FAILED: Code {return_code}")
-            
+
             # FINAL LAST RESORT
             if not is_already_proxied and not proxy_disabled and target_url and t1_enabled:
                 logger.info("CRITICAL FALLBACK: Attempting Tier 1 as last resort.")
@@ -471,7 +426,7 @@ def process_and_execute(incoming_args):
                     video_type = "va"
                     resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
                     if custom_ua: resolve_url += f"&ua={quote_plus(custom_ua)}"
-                        
+
                     req = urllib.request.Request(resolve_url, method='GET')
                     with urllib.request.urlopen(req, timeout=res_timeout) as response:
                         if response.status == 200:
@@ -482,7 +437,7 @@ def process_and_execute(incoming_args):
                                 safe_print(new_url)
                                 return 0
                 except: pass
-                
+
                 encoded_url = quote_plus(target_url)
                 new_url = f"{REMOTE_SERVER_BASE}/stream?url={encoded_url}"
                 logger.info(f"Last Resort Direct: {new_url}")
@@ -495,13 +450,6 @@ def process_and_execute(incoming_args):
     return return_code
 
 def main():
-    logger.info("--- VRChat yt-dlp Wrapper Initialized ---")
-    logger.info(f"Arguments received: {sys.argv[1:]}")
-    logger.info(f"Tier 1 (Proxy): {REMOTE_SERVER_BASE}")
-    logger.info(f"Tier 2 (Latest): {LATEST_YTDLP_PATH}")
-    logger.info(f"Tier 2 (Deno): {DENO_PATH}")
-    logger.info(f"Tier 3 (VRChat): {ORIGINAL_YTDLP_PATH}")
-    
     try:
         return_code = process_and_execute(sys.argv[1:])
         sys.exit(return_code)

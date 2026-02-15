@@ -1,5 +1,10 @@
 # Changelog
 
+## [v2026.02.15.4] - 2026-02-15
+### Improved
+- **Logging**: Significantly improved visibility in non-debug builds. Tier transitions, resolution status, and key patcher actions are now logged at the `INFO` level.
+- **Patcher**: Changed default log level from `ERROR` to `INFO` for standard release builds.
+
 ## [v2026.02.15.2] - 2026-02-15
 ### Changed
 - **Architecture**: Completely restructured the 3-tier fallback system: Modern yt-dlp + Deno (Tier 1) -> WhyKnot Proxy (Tier 2) -> Native yt-dlp (Tier 3).

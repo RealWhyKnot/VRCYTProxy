@@ -224,7 +224,7 @@ def setup_logging():
     temp_cfg = load_config(config_path)
     is_debug = temp_cfg.get("debug_mode", BUILD_TYPE == "DEV")
     
-    level = logging.DEBUG if is_debug else logging.ERROR
+    level = logging.DEBUG if is_debug else logging.INFO
     logger.setLevel(level)
 
     ch = logging.StreamHandler(sys.stdout)
@@ -652,13 +652,13 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
 
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
-        logger.debug(f"Copying wrapper files from {SOURCE_WRAPPER_DIR} to {VRCHAT_TOOLS_DIR}")
+        logger.info(f"Copying wrapper files to {VRCHAT_TOOLS_DIR}...")
         retry_operation(lambda: shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True))
         
         # Also copy the config file so the wrapper can find it
         config_src = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
         config_dst = os.path.join(VRCHAT_TOOLS_DIR, CONFIG_FILE_NAME)
-        logger.debug(f"Syncing config: {config_src} -> {config_dst}")
+        logger.info("Syncing patcher configuration...")
         try:
             retry_operation(lambda: shutil.copy2(config_src, config_dst))
         except Exception as e:

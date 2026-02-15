@@ -263,12 +263,12 @@ def process_and_execute(incoming_args):
                         # DETECTION LOGIC: If called again within the window, assume playback failure        
                         if current_time - last_req < retry_window:
                             forced_tier = min(current_tier + 1, 3) # Cap at Tier 3
-                            logger.warning(f"RAPID RETRY DETECTED (\u0394{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
+                            logger.info(f"RAPID RETRY DETECTED (Δ{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
                         else:
                             if current_time < failed_info.get('expiry', 0):
                                 forced_tier = failed_info.get('tier', 0)
                                 if forced_tier > 0:
-                                    logger.warning(f"PREVIOUS FAILURE REMEMBERED. Starting at Tier {forced_tier}.")
+                                    logger.info(f"PREVIOUS FAILURE REMEMBERED. Starting at Tier {forced_tier}.")
 
                     # Update state PRE-EXECUTION to track this attempt
                     failed_info = failed_urls.get(target_url, {'tier': 0, 'last_request_time': 0})
@@ -303,7 +303,7 @@ def process_and_execute(incoming_args):
 
         # --- TIER 1: MODERN (yt-dlp-latest + deno) ---
         if forced_tier <= 0 and t1_modern_enabled:
-            logger.debug("Tier 1 [MODERN]: Resolving...")
+            logger.info("Tier 1 [MODERN]: Resolving...")
             
             tier_1_args = []
             skip_next = False
@@ -329,17 +329,17 @@ def process_and_execute(incoming_args):
             )
 
             if return_code == 0 and resolved_url and resolved_url.startswith('http'):
-                logger.debug(f"TIER 1 SUCCESS: {resolved_url}")
+                logger.info(f"TIER 1 SUCCESS: {resolved_url}")
                 update_wrapper_success()
                 safe_print(resolved_url)
                 return 0
             else:
-                logger.warning(f"TIER 1 FAILED: Code {return_code}. Moving to Tier 2.")
+                logger.info(f"TIER 1 FAILED: Code {return_code}. Moving to Tier 2.")
                 forced_tier = 1
 
         # --- TIER 2: PROXY (WhyKnot.dev) ---
         if forced_tier <= 1 and t2_proxy_enabled:
-            logger.debug(f"Tier 2 [PROXY]: Resolving {target_url}...")
+            logger.info(f"Tier 2 [PROXY]: Resolving {target_url}...")
             try:
                 video_type = "va"
                 for i, arg in enumerate(incoming_args):
@@ -359,39 +359,39 @@ def process_and_execute(incoming_args):
                         status = data.get("status", "ready")
 
                         if status == "failed":
-                            logger.error("TIER 2 FAILED: Server reported status 'failed'.")
+                            logger.info("TIER 2 FAILED: Server reported status 'failed'.")
                             forced_tier = 2
                         elif new_url:
-                            logger.debug(f"TIER 2 SUCCESS: {new_url} (Status: {status})")
+                            logger.info(f"TIER 2 SUCCESS: {new_url} (Status: {status})")
                             update_wrapper_success()
                             safe_print(new_url)
                             return 0
                     else:
-                        logger.error(f"TIER 2 FAILED: HTTP {response.status}")
+                        logger.info(f"TIER 2 FAILED: HTTP {response.status}")
                         forced_tier = 2
             except Exception as e:
-                logger.error(f"TIER 2 FAILED: {e}")
+                logger.info(f"TIER 2 FAILED: {e}")
                 forced_tier = 2
 
         # --- TIER 3: NATIVE (VRChat Original) ---
         # If Tier 1 was disabled (FORCE mode), we don't fall back to native.
         if t3_native_enabled:
             if not t1_modern_enabled:
-                logger.warning("Tier 3 [NATIVE] SKIPPED: Force Tier 2 mode active.")
+                logger.info("Tier 3 [NATIVE] SKIPPED: Force Tier 2 mode active.")
                 return 1
             
-            logger.debug("Tier 3 [NATIVE]: Resolving...")
+            logger.info("Tier 3 [NATIVE]: Resolving...")
             final_output, return_code = attempt_executable(
                 ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args,
                 log_level=logging.DEBUG
             )
 
             if return_code == 0 and final_output:
-                logger.debug(f"TIER 3 SUCCESS")
+                logger.info(f"TIER 3 SUCCESS")
                 safe_print(final_output)
                 return 0
             else:
-                logger.error(f"ALL TIERS FAILED: {target_url}")
+                logger.warning(f"ALL TIERS FAILED: {target_url}")
                 sys.stderr.write(f"Wrapper Error: All tiers failed.\n")
 
         return return_code

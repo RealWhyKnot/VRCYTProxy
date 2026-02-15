@@ -16,6 +16,8 @@ import atexit
 import signal
 import ctypes
 import hashlib
+import msvcrt
+import subprocess
 
 if platform.system() == 'Windows':
     os.system('color')
@@ -24,7 +26,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.02.12.dev-main-9fe7379"
+    CURRENT_VERSION = "v2026.02.12.dev-main-16a3f98"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -163,7 +165,8 @@ def load_config(config_path):
         "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"],
         "debug_mode": BUILD_TYPE == "DEV",
         "force_patch_in_public": False,
-        "auto_update_check": True
+        "auto_update_check": True,
+        "first_run": True
     }
     config = defaults.copy()
     if os.path.exists(config_path):
@@ -827,12 +830,115 @@ atexit.register(cleanup_on_exit)
 signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0))
 
+def create_shortcut(target, shortcut_path):
+    try:
+        working_dir = os.path.dirname(target)
+        # Escape single quotes for PowerShell
+        target_esc = target.replace("'", "''")
+        shortcut_esc = shortcut_path.replace("'", "''")
+        wdir_esc = working_dir.replace("'", "''")
+        
+        powershell_cmd = f"$s=(New-Object -COM WScript.Shell).CreateShortcut('{shortcut_esc}');$s.TargetPath='{target_esc}';$s.WorkingDirectory='{wdir_esc}';$s.Save()"
+        subprocess.run(["powershell", "-NoProfile", "-Command", powershell_cmd], capture_output=True, check=True)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to create shortcut: {e}")
+        return False
+
+def handle_first_run():
+    if not CONFIG.get("first_run", True):
+        return
+
+    print("\n" + "="*50)
+    print(f"{Colors.BOLD}{Colors.CYAN}FIRST TIME SETUP{Colors.RESET}")
+    print("="*50)
+    print("Would you like to install the patcher into VRCX's auto-launcher?")
+    print("This will start the patcher automatically when VRCX launches.")
+    print(f"\nPress {Colors.GREEN}'Y'{Colors.RESET} to install, {Colors.RED}'N'{Colors.RESET} to skip.")
+    print("(This prompt will timeout in 30 seconds)")
+    
+    start_time = time.time()
+    choice = None
+    while time.time() - start_time < 30:
+        if msvcrt.kbhit():
+            key = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+            if key == 'y':
+                choice = True
+                break
+            if key == 'n':
+                choice = False
+                break
+        time.sleep(0.1)
+    
+    if choice is True:
+        app_exe = sys.executable if getattr(sys, 'frozen', False) else None
+        if not app_exe:
+            logger.warning("Not running as frozen executable. Skipping VRCX installation.")
+        else:
+            vrcx_startup_base = os.path.join(os.environ.get('APPDATA', ''), 'VRCX', 'startup')
+            paths = [
+                os.path.join(vrcx_startup_base, 'desktop'),
+                os.path.join(vrcx_startup_base, 'vr')
+            ]
+            
+            success_count = 0
+            for p in paths:
+                if not os.path.exists(p):
+                    try: os.makedirs(p)
+                    except Exception: continue
+                
+                shortcut_path = os.path.join(p, "VRCYTProxy.lnk")
+                if create_shortcut(app_exe, shortcut_path):
+                    success_count += 1
+            
+            if success_count > 0:
+                print(f"{Colors.GREEN}Successfully installed to {success_count} VRCX startup folders.{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}Failed to install to VRCX folders.{Colors.RESET}")
+    elif choice is False:
+        print("Skipping VRCX installation.")
+    else:
+        print("Timeout reached. Skipping VRCX installation for now.")
+
+    # Mark first run as complete
+    CONFIG["first_run"] = False
+    save_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME), CONFIG)
+
+def wait_for_vrchat_log():
+    print(f"\n{Colors.CYAN}Waiting for VRChat log...{Colors.RESET}")
+    print("VRChat might be starting. Checking for a fresh log file.")
+    print(f"Press {Colors.YELLOW}ANY KEY{Colors.RESET} to skip wait and use latest available log.")
+    
+    start_time = time.time()
+    program_start = time.time()
+    
+    while time.time() - start_time < 15:
+        if msvcrt.kbhit():
+            msvcrt.getch() # Clear buffer
+            print("Skip requested by user.")
+            return find_latest_log_file()
+            
+        latest = find_latest_log_file()
+        if latest:
+            try:
+                if os.path.getmtime(latest) > program_start - 2: # Buffer for clock drift
+                    print(f"{Colors.GREEN}Fresh log detected: {os.path.basename(latest)}{Colors.RESET}")
+                    return latest
+            except Exception: pass
+            
+        time.sleep(0.5)
+    
+    print("No new log detected within 15s. Using latest existing log.")
+    return find_latest_log_file()
+
 def main():
     install_exit_handler()
     
     # Force visibility for startup info
     print(f"{Colors.CYAN}{Colors.BOLD}VRCYTProxy Patcher {CURRENT_VERSION}{Colors.RESET} ({BUILD_TYPE}) starting up...")
     check_for_updates()
+    
+    handle_first_run()
     
     try:
         with open(WRAPPER_FILE_LIST_PATH, 'r', encoding='utf-8-sig') as f:
@@ -850,6 +956,11 @@ def main():
 
     # Start VRChat Log Monitor Thread
     monitor = LogMonitor()
+    
+    initial_log = wait_for_vrchat_log()
+    if initial_log:
+        monitor.update_log_file(initial_log)
+
     vrc_monitor_thread = threading.Thread(target=log_monitor_thread_func, args=(monitor, stop_event), daemon=True)
     vrc_monitor_thread.start()
 

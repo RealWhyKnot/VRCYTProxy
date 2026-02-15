@@ -26,7 +26,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.02.12.dev-main-16a3f98"
+    CURRENT_VERSION = "v2026.02.15.dev-main-444f6f7"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -44,7 +44,7 @@ class PatchState(Enum):
 
 POLL_INTERVAL = 3.0 
 LOG_FILE_NAME = 'patcher.log'
-REDIRECTOR_LOG_NAME = 'wrapper_debug.log'
+REDIRECTOR_LOG_NAME = 'wrapper.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
 WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
 
@@ -60,15 +60,20 @@ WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
 _console_handler_ref = None
 
 def calculate_sha256(filepath):
+    logger.debug(f"Calculating SHA256 for: {filepath}")
     if not os.path.exists(filepath):
+        logger.debug(f"File does not exist for hashing: {filepath}")
         return None
     sha256_hash = hashlib.sha256()
     try:
         with open(filepath, "rb") as f:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
-    except Exception:
+        res = sha256_hash.hexdigest()
+        logger.debug(f"SHA256 for {os.path.basename(filepath)}: {res[:12]}...")
+        return res
+    except Exception as e:
+        logger.debug(f"Failed to calculate SHA256 for {filepath}: {e}")
         return None
 
 def install_exit_handler():
@@ -85,6 +90,16 @@ def install_exit_handler():
 
         _console_handler_ref = HandlerRoutine(console_handler)
         ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_handler_ref, True)
+
+def save_config(config_path, config_data):
+    logger.debug(f"Saving config to: {config_path}")
+    try:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2)
+        logger.debug("Config save successful.")
+    except Exception as e:
+        # We don't have a logger yet during early config load sometimes
+        sys.stderr.write(f"Failed to save config to {config_path}: {e}\n")
 
 class Colors:
     RESET = "\033[0m"
@@ -150,7 +165,8 @@ def load_config(config_path):
             "VideoError", 
             "[AVProVideo] Error", 
             "[VideoTXL] Error", 
-            "Loading failed"
+            "Loading failed",
+            "PlayerError"
         ],
         "instance_patterns": {
             "invite": "~private",
@@ -160,13 +176,14 @@ def load_config(config_path):
             "group_plus": "groupAccessType(plus)",
             "group": "~group"
         },
-        "proxy_domain": "whyknot.dev",
-        "always_proxy": False,
-        "proxy_domains": ["youtube.com", "youtu.be", "twitch.tv", "vrcdn.live", "vrcdn.video"],
+        "use_test_version": False,
         "debug_mode": BUILD_TYPE == "DEV",
         "force_patch_in_public": False,
         "auto_update_check": True,
-        "first_run": True
+        "first_run": True,
+        "enable_tier1_modern": True,
+        "enable_tier2_proxy": True,
+        "enable_tier3_native": True
     }
     config = defaults.copy()
     if os.path.exists(config_path):
@@ -176,17 +193,19 @@ def load_config(config_path):
                 if not isinstance(user_config, dict):
                     raise ValueError("Config must be a JSON object")
                 
-                # MIGRATION: Rename proxy_all to always_proxy if found
-                if "proxy_all" in user_config:
-                    user_config["always_proxy"] = user_config.pop("proxy_all")
-                    needs_save = True
-
+                logger.debug(f"Loaded config from {config_path}")
+                needs_save = False
+                
                 for k, v in defaults.items():
                     if k not in user_config:
                         user_config[k] = v
                         needs_save = True
+                        logger.debug(f"Added missing config key: {k}")
+
                 config = user_config
-                if needs_save: save_config(config_path, config)
+                if needs_save: 
+                    logger.debug("Saving updated config...")
+                    save_config(config_path, config)
         except (json.JSONDecodeError, ValueError) as e:
             # We don't have logger yet
             sys.stderr.write(f"Failed to load config from {config_path}: {e}. Regenerating defaults...\n")
@@ -215,7 +234,10 @@ def setup_logging():
 
     try:
         file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        fh = RotatingFileHandler(LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
+        # Use mode='w' for RotatingFileHandler doesn't work as expected for "wipe on start", 
+        # so we'll just use a standard FileHandler for the current run and maybe rotation later.
+        # Actually, let's just use a basic FileHandler with 'w' and then add rotation if needed.
+        fh = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
         fh.setLevel(level)
         fh.setFormatter(file_formatter)
         logger.addHandler(fh)
@@ -247,13 +269,20 @@ def prompt_for_log_dir(config_path):
 
 def get_vrchat_log_dir(base_path):
     config_path = os.path.join(base_path, CONFIG_FILE_NAME)
+    logger.debug(f"Locating VRChat log directory (Config: {config_path})")
     config = load_config(config_path)
     log_dir = config.get('vrchat_log_dir')
-    if log_dir and os.path.exists(log_dir) and os.path.isdir(log_dir):
-        logger.info(f"Loaded VRChat log directory from config: {log_dir}")
-        return log_dir
+    if log_dir:
+        logger.debug(f"Configured log_dir: {log_dir}")
+        if os.path.exists(log_dir) and os.path.isdir(log_dir):
+            logger.info(f"Loaded VRChat log directory from config: {log_dir}")
+            return log_dir
+        else:
+            logger.debug(f"Configured log_dir does not exist or is not a directory: {log_dir}")
+
     logger.info("Checking default VRChat log paths...")
     for path in get_platform_default_paths():
+        logger.debug(f"Checking default path: {path}")
         if os.path.exists(path) and os.path.isdir(path):
             logger.info(f"Found VRChat log directory at: {path}")
             config['vrchat_log_dir'] = path
@@ -261,37 +290,47 @@ def get_vrchat_log_dir(base_path):
             return path
     return prompt_for_log_dir(config_path)
 
-CONFIG = load_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME))
-VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
-VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
-TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
-ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
-SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
-REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
-WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
+# --- Global State Placeholder ---
+CONFIG = {}
+VRCHAT_LOG_DIR = None
+VRCHAT_TOOLS_DIR = None
+TARGET_YTDLP_PATH = None
+ORIGINAL_YTDLP_BACKUP_PATH = None
+SECURE_BACKUP_PATH = None
+REDIRECTOR_LOG_PATH = None
+WRAPPER_STATE_PATH = None
 
 def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
+    logger.debug(f"Updating wrapper state (Path: {WRAPPER_STATE_PATH})")
     try:
         state = {'consecutive_errors': 0, 'failed_urls': {}}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
-            except Exception: pass
+                logger.debug("Successfully loaded existing wrapper state.")
+            except Exception as e:
+                logger.debug(f"Failed to load wrapper state: {e}")
         
         if 'failed_urls' not in state: state['failed_urls'] = {}
 
         if is_broken:
             count = state.get('consecutive_errors', 0) + 1
             state['consecutive_errors'] = count
+            logger.debug(f"Handling failure #{count}")
             
             if failed_url:
                 # Store the URL and when it failed. We block it for a while.
+                existing = state['failed_urls'].get(failed_url, {})
+                current_tier = existing.get('tier', 0)
+                new_tier = min(current_tier + 1, 3)
+                
                 state['failed_urls'][failed_url] = {
                     'expiry': time.time() + 300, # Block this specific URL for 5 mins
-                    'tier': 1 # We'll implement tier escalation in wrapper
+                    'tier': new_tier,
+                    'last_request_time': existing.get('last_request_time', time.time())
                 }
-                logger.warning(f"URL Failed: {failed_url}. Force bypassing proxy for this URL for 5m.")
+                logger.warning(f"URL Failed: {failed_url}. Escalating to Tier {new_tier} for this URL.")
             else:
                 state['force_fallback'] = True
                 if duration:
@@ -304,16 +343,23 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
                 state['fallback_until'] = time.time() + wait_time
                 logger.warning(f"Proxy Error #{count}. Falling back for {wait_time}s (until {time.ctime(state['fallback_until'])})")
         else:
+            if state.get('consecutive_errors', 0) > 0:
+                logger.debug("Clearing consecutive errors.")
             state['consecutive_errors'] = 0
             state['force_fallback'] = False
             # We don't necessarily clear failed_urls here as they are per-URL
         
         # Cleanup expired failed_urls
         now = time.time()
+        before_cleanup = len(state['failed_urls'])
         state['failed_urls'] = {u: d for u, d in state.get('failed_urls', {}).items() if d.get('expiry', 0) > now}
+        after_cleanup = len(state['failed_urls'])
+        if before_cleanup != after_cleanup:
+            logger.debug(f"Cleaned up {before_cleanup - after_cleanup} expired URLs from state.")
 
         with open(WRAPPER_STATE_PATH, 'w') as f:
             json.dump(state, f)
+        logger.debug("Wrapper state written successfully.")
     except Exception as e:
         logger.error(f"Failed to update wrapper state: {e}")
 
@@ -468,6 +514,8 @@ def get_patch_state():
     backup_hash = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
     backup_exists = backup_hash is not None and backup_hash != wrapper_hash and backup_hash != EMPTY_SHA256
     
+    logger.debug(f"State Check: target={target_hash[:12] if target_hash else 'NONE'}, wrapper={wrapper_hash[:12] if wrapper_hash else 'NONE'}, backup_exists={backup_exists}")
+
     if target_hash and wrapper_hash and target_hash == wrapper_hash:
         if backup_exists: return PatchState.ENABLED
         else: return PatchState.BROKEN
@@ -513,6 +561,13 @@ def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
                     retry_operation(lambda: shutil.rmtree(file_path))
             except Exception as e:
                 logger.warning(f"Failed to remove {file_path}: {e}")
+    
+    # Also clean up the config copy
+    config_in_tools = os.path.join(VRCHAT_TOOLS_DIR, CONFIG_FILE_NAME)
+    if os.path.exists(config_in_tools):
+        try:
+            retry_operation(lambda: os.remove(config_in_tools))
+        except Exception: pass
 
 def enable_patch(wrapper_file_list, is_waiting_flag):
     try:
@@ -576,6 +631,7 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
         elif not target_hash or target_hash == EMPTY_SHA256:
             bh = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
             sh = calculate_sha256(SECURE_BACKUP_PATH)
+            logger.debug(f"Target missing/empty. Backups: bh={bh[:12] if bh else 'NONE'}, sh={sh[:12] if sh else 'NONE'}")
             if not (bh and bh != wrapper_hash and bh != EMPTY_SHA256):
                  if sh and sh != wrapper_hash and sh != EMPTY_SHA256:
                      logger.info("Primary backup missing, but secure backup found. Restoring primary...")
@@ -586,15 +642,38 @@ def enable_patch(wrapper_file_list, is_waiting_flag):
 
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=False)
         
+        logger.debug(f"Copying wrapper files from {SOURCE_WRAPPER_DIR} to {VRCHAT_TOOLS_DIR}")
         retry_operation(lambda: shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True))
         
+        # Also copy the config file so the wrapper can find it
+        config_src = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
+        config_dst = os.path.join(VRCHAT_TOOLS_DIR, CONFIG_FILE_NAME)
+        logger.debug(f"Syncing config: {config_src} -> {config_dst}")
+        try:
+            retry_operation(lambda: shutil.copy2(config_src, config_dst))
+        except Exception as e:
+            logger.warning(f"Failed to copy config to Tools: {e}")
+
+        # Explicitly ensure deno.exe and yt-dlp-latest.exe are in Tools
+        for extra in ["deno.exe", "yt-dlp-latest.exe"]:
+            src = os.path.join(SOURCE_WRAPPER_DIR, extra)
+            dst = os.path.join(VRCHAT_TOOLS_DIR, extra)
+            if os.path.exists(src):
+                try:
+                    logger.debug(f"Ensuring component: {extra}")
+                    retry_operation(lambda: shutil.copy2(src, dst))
+                except Exception as e:
+                    logger.debug(f"Failed to copy {extra}: {e}")
+
         copied_wrapper_path = os.path.join(VRCHAT_TOOLS_DIR, WRAPPER_EXE_NAME)
         if os.path.exists(copied_wrapper_path):
             if os.path.exists(TARGET_YTDLP_PATH):
                 current_target_hash = calculate_sha256(TARGET_YTDLP_PATH)
+                logger.debug(f"Removing existing target (hash={current_target_hash[:12] if current_target_hash else 'NONE'})")
                 if current_target_hash == wrapper_hash or current_target_hash == EMPTY_SHA256:
                     retry_operation(lambda: os.remove(TARGET_YTDLP_PATH))
             
+            logger.debug(f"Finalizing patch: {copied_wrapper_path} -> {TARGET_YTDLP_PATH}")
             retry_operation(lambda: os.replace(copied_wrapper_path, TARGET_YTDLP_PATH))
             logger.info("Patch enabled successfully.")
             return True, False
@@ -700,17 +779,22 @@ def disable_patch(wrapper_file_list):
 def repair_patch(wrapper_file_list):
     logger.warning("Repairing patch state...")
     try:
+        logger.debug("Attempting full cleanup of wrapper files for repair.")
         _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True)
         return PatchState.DISABLED
-    except Exception:
+    except Exception as e:
+        logger.error(f"Repair failed: {e}")
         return PatchState.BROKEN
 
 instance_info_cache = {}
 
 def parse_instance_type_from_line(line):
     if '[Behaviour] Destination set:' in line or '[Behaviour] Joining' in line:
+        logger.debug(f"Parsing instance from line: {line.strip()}")
         wrld_match = re.search(r'(wrld_[a-f0-9\-]+)', line)
-        if not wrld_match: return None
+        if not wrld_match: 
+            logger.debug("No world ID found in joining line.")
+            return None
         world_str = line[wrld_match.start():]
         patterns = CONFIG.get("instance_patterns", {})
         
@@ -734,10 +818,15 @@ class LogMonitor:
         self.current_log = None
         self.last_pos = 0
         self.last_instance_type = "private"
-        self.proxy_domain = CONFIG.get("proxy_domain", "whyknot.dev")
+        
+        # Determine proxy domain based on test version flag
+        self.proxy_domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         self.error_patterns = CONFIG.get("video_error_patterns", [])
         self.last_attempted_url = None
         self.is_initial_scan = False
+        
+        # Track mapping from resolved URL -> Source URL for escalation
+        self.resolved_to_source = {} 
 
     def update_log_file(self, path):
         if path != self.current_log:
@@ -748,27 +837,46 @@ class LogMonitor:
             try:
                 file_size = os.path.getsize(path)
                 self.last_pos = max(0, file_size - STARTUP_SCAN_DEPTH)
-            except Exception: pass
+                logger.debug(f"Log seek: {self.last_pos} bytes (Size: {file_size})")
+            except Exception as e:
+                logger.debug(f"Failed to get log size: {e}")
 
     def tick(self):
         if not self.current_log or not os.path.exists(self.current_log): return
         
         try:
             current_size = os.path.getsize(self.current_log)
-            if self.last_pos > current_size: self.last_pos = 0
+            if self.last_pos > current_size: 
+                logger.debug(f"Log truncated: {self.last_pos} -> {current_size}")
+                self.last_pos = 0
             
             if current_size > self.last_pos:
                 with open(self.current_log, 'r', encoding='utf-8', errors='replace') as f:
                     f.seek(self.last_pos)
                     new_lines = f.readlines()
                     if new_lines:
-                        # If we just read a bunch of lines, and we haven't reached the current 
-                        # 'end' that existed when tick started, we are still catching up.
-                        # However, f.tell() will likely be close to current_size.
-                        
+                        logger.debug(f"Read {len(new_lines)} new lines from log.")
                         self.last_pos = f.tell()
                         for line in new_lines:
-                            # 1. Catch URL Loading attempts to track what might fail
+                            # 1. Track Resolution Mapping (Source URL -> Resolved URL)
+                            # Format: [Video Playback] URL 'SOURCE' resolved to 'RESOLVED'
+                            if "[Video Playback] URL '" in line and "' resolved to '" in line:
+                                try:
+                                    parts = line.split("'")
+                                    if len(parts) >= 4:
+                                        source_url = parts[1]
+                                        resolved_url = parts[3]
+                                        self.resolved_to_source[resolved_url] = source_url
+                                        logger.debug(f"Resolution Mapping: {resolved_url[:50]}... -> {source_url}")
+                                        # Cleanup old mappings if dictionary gets too large
+                                        if len(self.resolved_to_source) > 100:
+                                            # Simple LRU-ish: remove first 50
+                                            keys = list(self.resolved_to_source.keys())
+                                            for k in keys[:50]: del self.resolved_to_source[k]
+                                except Exception as e:
+                                    logger.debug(f"Failed to parse resolution mapping: {e}")
+
+                            # 2. Catch URL Loading attempts to track what might fail
                             if "[AVProVideo] Opening" in line:
                                 url_match = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
                                 if url_match:
@@ -776,13 +884,20 @@ class LogMonitor:
                                     if not self.is_initial_scan:
                                         logger.debug(f"Detected video load attempt: {self.last_attempted_url}")
 
-                            # 2. Catch Errors (ONLY if not in initial scan)
+                            # 3. Catch Errors (ONLY if not in initial scan)
                             if any(x in line for x in self.error_patterns):
                                 if not self.is_initial_scan:
-                                    if self.last_attempted_url and self.proxy_domain in self.last_attempted_url:
-                                        logger.warning(f"Detected Proxy Video Error: {line.strip()}")
+                                    if self.last_attempted_url:
+                                        logger.warning(f"Detected Video Error: {line.strip()}")
                                         original_url = None
-                                        if "url=" in self.last_attempted_url:
+                                        
+                                        # CASE A: Check if this was a resolved URL failing
+                                        if self.last_attempted_url in self.resolved_to_source:
+                                            original_url = self.resolved_to_source[self.last_attempted_url]
+                                            logger.info(f"Failing URL is a resolved URL. Escalating SOURCE: {original_url}")
+                                        
+                                        # CASE B: If it's a proxy URL, try to extract the original URL from the query string
+                                        elif self.proxy_domain in self.last_attempted_url and "url=" in self.last_attempted_url:
                                             try:
                                                 import urllib.parse
                                                 parsed = urllib.parse.urlparse(self.last_attempted_url)
@@ -794,7 +909,7 @@ class LogMonitor:
                                         target_to_block = original_url if original_url else self.last_attempted_url
                                         update_wrapper_state(is_broken=True, failed_url=target_to_block)
                                     else:
-                                        logger.info(f"Detected Non-Proxy Video Error: {line.strip()}")
+                                        logger.info(f"Detected Video Error (No URL found): {line.strip()}")
                                 else:
                                     # Just log internally that we found an old error but are skipping it
                                     pass
@@ -847,6 +962,15 @@ def create_shortcut(target, shortcut_path):
 
 def handle_first_run():
     if not CONFIG.get("first_run", True):
+        return
+
+    # Pre-check: If any shortcut already exists, don't bother asking
+    vrcx_startup_base = os.path.join(os.environ.get('APPDATA', ''), 'VRCX', 'startup')
+    existing_shortcuts = glob.glob(os.path.join(vrcx_startup_base, '*', 'VRCYTProxy.lnk'))
+    if existing_shortcuts:
+        logger.debug(f"Detected existing VRCX shortcuts: {existing_shortcuts}. Skipping first-run prompt.")
+        CONFIG["first_run"] = False
+        save_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME), CONFIG)
         return
 
     print("\n" + "="*50)
@@ -934,12 +1058,61 @@ def wait_for_vrchat_log():
 def main():
     install_exit_handler()
     
+    global CONFIG, VRCHAT_LOG_DIR, VRCHAT_TOOLS_DIR, TARGET_YTDLP_PATH
+    global ORIGINAL_YTDLP_BACKUP_PATH, SECURE_BACKUP_PATH, REDIRECTOR_LOG_PATH, WRAPPER_STATE_PATH
+    
+    CONFIG = load_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME))
+    VRCHAT_LOG_DIR = get_vrchat_log_dir(APP_BASE_PATH)
+    VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
+    TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
+    ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
+    SECURE_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, SECURE_BACKUP_NAME)
+    REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
+    WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
+
     # Force visibility for startup info
     print(f"{Colors.CYAN}{Colors.BOLD}VRCYTProxy Patcher {CURRENT_VERSION}{Colors.RESET} ({BUILD_TYPE}) starting up...")
     check_for_updates()
     
     handle_first_run()
     
+    # Session-level Tier 2 Proxy Prompt (Debug/Dev only)
+    if CONFIG.get("debug_mode", False) or BUILD_TYPE == "DEV":
+        print("\n" + "-"*50)
+        print(f"{Colors.BOLD}{Colors.CYAN}SESSION SETUP (DEBUG/DEV){Colors.RESET}")
+        print("-"*50)
+        print("How would you like to handle Tier 2 Proxy (WhyKnot.dev)?")
+        print(f"[{Colors.GREEN}Y{Colors.RESET}] ENABLE  (Standard: Modern -> Proxy -> Native)")
+        print(f"[{Colors.MAGENTA}F{Colors.RESET}] FORCE   (Strict: Proxy ONLY - No Fallback)")
+        print(f"[{Colors.RED}N{Colors.RESET}] DISABLE (Bypass Tier 2: Modern -> Native)")
+        print("\n(15s Timeout -> Defaults to ENABLE)")
+        
+        start_time = time.time()
+        choice = None
+        while time.time() - start_time < 15:
+            if msvcrt.kbhit():
+                key = msvcrt.getch().decode('utf-8', errors='ignore').lower()
+                if key == 'y': choice = 'y'; break
+                if key == 'f': choice = 'f'; break
+                if key == 'n': choice = 'n'; break
+            time.sleep(0.1)
+        
+        if choice == 'y' or choice is None:
+            if choice is None: print("Timeout reached.")
+            print(f"{Colors.GREEN}Tier 2 Proxy ENABLED (Standard Priority).{Colors.RESET}")
+            CONFIG["enable_tier1_modern"] = True
+            CONFIG["enable_tier2_proxy"] = True
+        elif choice == 'f':
+            print(f"{Colors.MAGENTA}Tier 2 Proxy FORCED (Bypassing Tier 1).{Colors.RESET}")
+            CONFIG["enable_tier1_modern"] = False
+            CONFIG["enable_tier2_proxy"] = True
+        else:
+            print(f"{Colors.RED}Tier 2 Proxy DISABLED for this session.{Colors.RESET}")
+            CONFIG["enable_tier1_modern"] = True
+            CONFIG["enable_tier2_proxy"] = False
+        
+        save_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME), CONFIG)
+
     try:
         with open(WRAPPER_FILE_LIST_PATH, 'r', encoding='utf-8-sig') as f:
             WRAPPER_FILE_LIST = json.load(f)
@@ -957,6 +1130,10 @@ def main():
     # Start VRChat Log Monitor Thread
     monitor = LogMonitor()
     
+    logger.debug(f"Patcher Base Path: {APP_BASE_PATH}")
+    logger.debug(f"Source Wrapper Dir: {SOURCE_WRAPPER_DIR}")
+    logger.debug(f"Wrapper File List: {WRAPPER_FILE_LIST_PATH}")
+
     initial_log = wait_for_vrchat_log()
     if initial_log:
         monitor.update_log_file(initial_log)

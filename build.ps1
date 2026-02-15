@@ -7,6 +7,12 @@ $PSScriptRoot = $PSCommandPath | Split-Path
 $LogFilePath = Join-Path $PSScriptRoot "build_log.ps1.txt"
 
 Start-Transcript -Path $LogFilePath -Force
+
+# Terminate any running instances to prevent file locking
+Write-Host "Checking for running instances..." -ForegroundColor Cyan
+Get-Process "patcher", "yt-dlp-wrapper" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1 # Give time for file handles to release
+
 $ErrorActionPreference = "Stop"
 
 Write-Host "================================================="
@@ -146,15 +152,268 @@ try {
     
     Write-Host "Conda Python: $VenvPython"
 
-    # Automatically update the hardcoded fallback version in main.py
+    Write-Host "[1.5/6] Preparing workspace and Validating Python Source..." -ForegroundColor Green
+    
+    if (Test-Path $DistDir) { 
+        Remove-Item -Recurse -Force -Path $DistDir -ErrorAction SilentlyContinue 
+    }
+    if (Test-Path $BuildDir) { 
+        Remove-Item -Recurse -Force -Path $BuildDir 
+    }
+    New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+
+    # 1. Syntax Check
+    $SyntaxCheckCode = @"
+import sys
+import py_compile
+from pathlib import Path
+
+def check_syntax(directory):
+    success = True
+    for path in Path(directory).rglob('*.py'):
+        if '.venv' in str(path) or 'build' in str(path) or 'dist' in str(path):
+            continue
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except py_compile.PyCompileError as e:
+            print(f'Syntax Error in {path}:\n{e}')
+            success = False
+        except Exception as e:
+            print(f'Error checking {path}: {e}')
+            success = False
+    return success
+
+if __name__ == '__main__':
+    import os
+    src_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.getcwd())
+    if not check_syntax(src_dir):
+        sys.exit(1)
+    sys.exit(0)
+"@
+    $SyntaxCheckCode | Out-File -FilePath (Join-Path $BuildDir "syntax_check.py") -Encoding utf8
+    
+    # 2. Name Check (Undefined Variables)
+    $NameCheckCode = @"
+import ast
+import sys
+import builtins
+from pathlib import Path
+
+PYTHON_GLOBALS = {
+    '__name__', '__file__', '__doc__', '__package__', '__loader__', '__spec__', '__annotations__', '__builtins__'
+}
+
+class DefinitionCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.globals = set()
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            name = alias.asname or alias.name.split('.')[0]
+            self.globals.add(name)
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.globals.add(name)
+
+    def visit_FunctionDef(self, node):
+        self.globals.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.globals.add(node.name)
+
+    def visit_ClassDef(self, node):
+        self.globals.add(node.name)
+
+    def visit_Assign(self, node):
+        for target in node.targets:
+            self._collect_targets(target)
+
+    def _collect_targets(self, target):
+        if isinstance(target, ast.Name):
+            self.globals.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._collect_targets(elt)
+
+class NameCheckVisitor(ast.NodeVisitor):
+    def __init__(self, global_names):
+        self.scopes = [global_names | set(dir(builtins)) | PYTHON_GLOBALS]
+        self.undefined = []
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            name = alias.asname or alias.name.split('.')[0]
+            self.scopes[-1].add(name)
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.scopes[-1].add(name)
+
+    def visit_FunctionDef(self, node):
+        self.scopes[-1].add(node.name)
+        new_scope = set()
+        for arg in node.args.args: new_scope.add(arg.arg)
+        if node.args.vararg: new_scope.add(node.args.vararg.arg)
+        if node.args.kwarg: new_scope.add(node.args.kwarg.arg)
+        for arg in node.args.kwonlyargs: new_scope.add(arg.arg)
+        for arg in node.args.posonlyargs: new_scope.add(arg.arg)
+        self.scopes.append(new_scope)
+        for dec in node.decorator_list: self.visit(dec)
+        for stmt in node.body: self.visit(stmt)
+        self.scopes.pop()
+
+    def visit_AsyncFunctionDef(self, node):
+        self.visit_FunctionDef(node)
+
+    def visit_ClassDef(self, node):
+        self.scopes[-1].add(node.name)
+        self.scopes.append(set())
+        for dec in node.decorator_list: self.visit(dec)
+        for base in node.bases: self.visit(base)
+        for keyword in node.keywords: self.visit(keyword.value)
+        for stmt in node.body: self.visit(stmt)
+        self.scopes.pop()
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Store):
+            self.scopes[-1].add(node.id)
+        elif isinstance(node.ctx, ast.Load):
+            found = False
+            for scope in reversed(self.scopes):
+                if node.id in scope:
+                    found = True
+                    break
+            if not found:
+                self.undefined.append((node.id, node.lineno))
+
+    def visit_ExceptHandler(self, node):
+        if node.name: self.scopes[-1].add(node.name)
+        self.generic_visit(node)
+
+    def visit_With(self, node):
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars: self._define_target(item.optional_vars)
+        for stmt in node.body: self.visit(stmt)
+
+    def visit_For(self, node):
+        self.visit(node.iter)
+        self._define_target(node.target)
+        for stmt in node.body: self.visit(stmt)
+        for stmt in node.orelse: self.visit(stmt)
+
+    def visit_AsyncFor(self, node):
+        self.visit_For(node)
+
+    def _define_target(self, target):
+        if isinstance(target, ast.Name):
+            self.scopes[-1].add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts: self._define_target(elt)
+
+    def visit_ListComp(self, node):
+        self.scopes.append(set())
+        for gen in node.generators:
+            self.visit(gen.iter)
+            self._define_target(gen.target)
+            for if_clause in gen.ifs: self.visit(if_clause)
+        self.visit(node.elt)
+        self.scopes.pop()
+
+    def visit_SetComp(self, node):
+        self.visit_ListComp(node)
+
+    def visit_GeneratorExp(self, node):
+        self.visit_ListComp(node)
+
+    def visit_DictComp(self, node):
+        self.scopes.append(set())
+        for gen in node.generators:
+            self.visit(gen.iter)
+            self._define_target(gen.target)
+            for if_clause in gen.ifs: self.visit(if_clause)
+        self.visit(node.key)
+        self.visit(node.value)
+        self.scopes.pop()
+
+    def visit_Lambda(self, node):
+        new_scope = set()
+        for arg in node.args.args: new_scope.add(arg.arg)
+        self.scopes.append(new_scope)
+        self.visit(node.body)
+        self.scopes.pop()
+
+def check_file(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        try:
+            tree = ast.parse(f.read())
+        except Exception as e:
+            return [f'AST Parse Error: {e}']
+
+    collector = DefinitionCollector()
+    for node in tree.body: collector.visit(node)
+    
+    visitor = NameCheckVisitor(collector.globals)
+    visitor.visit(tree)
+    
+    errors = []
+    seen = set()
+    for name, line in visitor.undefined:
+        if (name, line) not in seen:
+            errors.append(f"Undefined name '{name}' at line {line}")
+            seen.add((name, line))
+    return errors
+
+if __name__ == '__main__':
+    import os
+    root_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.getcwd())
+    success = True
+    for path in root_dir.rglob('*.py'):
+        if any(x in str(path) for x in ['.old', '.venv', 'build', 'dist']): continue
+        errs = check_file(path)
+        if errs:
+            print(f'\n[FAIL] {path}')
+            for e in errs: print(f'  - {e}')
+            success = False
+    if not success: sys.exit(1)
+    sys.exit(0)
+"@
+    $NameCheckCode | Out-File -FilePath (Join-Path $BuildDir "name_check.py") -Encoding utf8
+
+    Write-Host "   -> Syntax Check..." -NoNewline
+    $SyntaxScript = (Join-Path $BuildDir "syntax_check.py")
+    $SrcRoot = $SrcPatcherDir.Parent.FullName
+    & $VenvPython "$SyntaxScript" "$SrcRoot"
+    if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
+    Write-Host " PASSED" -ForegroundColor Gray
+
+    Write-Host "   -> Name Check..." -NoNewline
+    $NameScript = (Join-Path $BuildDir "name_check.py")
+    & $VenvPython "$NameScript" "$SrcRoot"
+    if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
+    Write-Host " PASSED" -ForegroundColor Gray
+
+    # Automatically update the hardcoded fallback version in patcher main.py
     if ($Version -and $Version -match "^v") {
         $MainPyPath = Join-Path $SrcPatcherDir "main.py"
         if (Test-Path $MainPyPath) {
-            Write-Host "   -> Updating hardcoded fallback version in main.py to $Version..." -ForegroundColor Cyan
+            Write-Host "   -> Updating hardcoded fallback version in patcher main.py to $Version..." -ForegroundColor Cyan
             $MainPyContent = Get-Content $MainPyPath -Raw
-            # Match CURRENT_VERSION = "v..."
             $MainPyContent = $MainPyContent -replace 'CURRENT_VERSION = "v[^" ]+"', "CURRENT_VERSION = `"$Version`""
             [System.IO.File]::WriteAllText($MainPyPath, $MainPyContent)
+        }
+        
+        $RedirectorMainPy = Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py"
+        if (Test-Path $RedirectorMainPy) {
+            Write-Host "   -> Updating hardcoded fallback version in redirector main.py to $Version..." -ForegroundColor Cyan
+            $RedirContent = Get-Content $RedirectorMainPy -Raw
+            $RedirContent = $RedirContent -replace 'WRAPPER_VERSION = "v[^" ]+"', "WRAPPER_VERSION = `"$Version`""
+            $RedirContent = $RedirContent -replace 'BUILD_TYPE = "[^" ]+"', "BUILD_TYPE = `"$BuildType`""
+            [System.IO.File]::WriteAllText($RedirectorMainPy, $RedirContent)
         }
     }
 
@@ -175,17 +434,7 @@ try {
     
     Write-Host "Dependencies installed (PyInstaller bootloader recompiled)."
 
-    Write-Host "[3/6] Cleaning directories..." -ForegroundColor Green
-    if (Test-Path $DistDir) { 
-        Remove-Item -Recurse -Force -Path $DistDir -ErrorAction SilentlyContinue 
-        Write-Host "Cleaned dist."
-    }
-    if (Test-Path $BuildDir) { 
-        Remove-Item -Recurse -Force -Path $BuildDir 
-        Write-Host "Cleaned build."
-    }
-    New-Item -ItemType Directory -Path $DistDir | Out-Null
-    New-Item -ItemType Directory -Path $BuildDir | Out-Null
+    Write-Host "[3/6] Starting build process..." -ForegroundColor Green
     
     Write-Host "[4/6] Building executables..." -ForegroundColor Green
 
@@ -236,6 +485,14 @@ try {
 
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
+    
+    # Explicitly ensure _internal is in the list if it exists as a directory
+    if (Test-Path (Join-Path $WrapperBuildPath "_internal")) {
+        if ("_internal" -notin $WrapperFiles) {
+            $WrapperFiles += "_internal"
+        }
+    }
+    
     $WrapperFiles | ConvertTo-Json -Compress | Out-File -FilePath $WrapperFileListJson -Encoding ascii
     Write-Host "   -> Wrapper file list generated ($($WrapperFiles.Count) files)."
 

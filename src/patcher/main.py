@@ -26,7 +26,7 @@ try:
     from _version import __version__ as CURRENT_VERSION
     from _version import __build_type__ as BUILD_TYPE
 except ImportError:
-    CURRENT_VERSION = "v2026.02.15.dev-main-444f6f7"
+    CURRENT_VERSION = "v2026.02.15.dev-main-aa72022"
     BUILD_TYPE = "DEV"
 
 GITHUB_REPO_OWNER = "RealWhyKnot"
@@ -534,6 +534,16 @@ def _remove_wrapper_files(wrapper_file_list, clean_renamed_exe=True):
     if not wrapper_file_list: return
     logger.debug(f"Cleaning wrapper files (Clean Target: {clean_renamed_exe})...")
     
+    # Legacy Cleanup: explicitly remove things that might have been left behind by older versions
+    for legacy in ["warp-proxy.exe", "_internal", "_tmp"]:
+        legacy_path = os.path.join(VRCHAT_TOOLS_DIR, legacy)
+        if os.path.exists(legacy_path):
+            try:
+                if os.path.isfile(legacy_path): retry_operation(lambda: os.remove(legacy_path))
+                else: retry_operation(lambda: shutil.rmtree(legacy_path))
+                logger.debug(f"Cleanup: Removed legacy component: {legacy}")
+            except Exception: pass
+
     source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
     wrapper_hash = calculate_sha256(source_wrapper_path)
 

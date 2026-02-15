@@ -33,14 +33,14 @@ if (-not $Version) {
     }
 }
 
-$IsRelease = $Version -notmatch "dev"
-$FullVersionString = if ($IsRelease) { "$Version (RELEASE)" } else { "$Version (DEV)" }
+    $IsRelease = $Version -notmatch "dev"
+    $FullVersionString = if ($IsRelease) { "$Version (RELEASE)" } else { "$Version (DEV)" }
+    $BuildType = if ($IsRelease) { "RELEASE" } else { "DEV" }
 
-Write-Host "-------------------------------------------------"
-Write-Host "   Target Version: $FullVersionString"
-Write-Host "   Force Rebuild:  $Force"
-Write-Host "-------------------------------------------------" -ForegroundColor Cyan
-
+    Write-Host "-------------------------------------------------"
+    Write-Host "   Target Version: $FullVersionString"
+    Write-Host "   Force Rebuild:  $Force"
+    Write-Host "-------------------------------------------------" -ForegroundColor Cyan
 $PythonExe = "python" 
 $VendorDir = Join-Path $PSScriptRoot "vendor"
 $BuildDir = Join-Path $PSScriptRoot "build"
@@ -412,7 +412,7 @@ if __name__ == '__main__':
             Write-Host "   -> Updating hardcoded fallback version in redirector main.py to $Version..." -ForegroundColor Cyan
             $RedirContent = Get-Content $RedirectorMainPy -Raw
             $RedirContent = $RedirContent -replace 'WRAPPER_VERSION = "v[^" ]+"', "WRAPPER_VERSION = `"$Version`""
-            $RedirContent = $RedirContent -replace 'BUILD_TYPE = "[^" ]+"', "BUILD_TYPE = `"$BuildType`""
+            $RedirContent = $RedirContent -replace 'BUILD_TYPE = "[^" ]*"', "BUILD_TYPE = `"$BuildType`""
             [System.IO.File]::WriteAllText($RedirectorMainPy, $RedirContent)
         }
     }
@@ -497,7 +497,6 @@ if __name__ == '__main__':
     Write-Host "   -> Wrapper file list generated ($($WrapperFiles.Count) files)."
 
     $VersionFile = Join-Path $SrcPatcherDir "_version.py"
-    $BuildType = if ($IsRelease) { "RELEASE" } else { "DEV" }
     
     Write-Host "   -> Generating version file: $Version ($BuildType)"
     "__version__ = '$Version'`n__build_type__ = '$BuildType'" | Out-File -FilePath $VersionFile -Encoding UTF8

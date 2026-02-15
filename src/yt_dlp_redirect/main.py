@@ -14,7 +14,7 @@ from urllib.parse import quote_plus
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.15.dev-main-444f6f7" # Updated by build script
+WRAPPER_VERSION = "v2026.02.15.dev-main-aa72022" # Updated by build script
 BUILD_TYPE = "" # Updated by build script
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"

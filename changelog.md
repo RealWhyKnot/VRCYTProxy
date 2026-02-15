@@ -1,5 +1,24 @@
 # Changelog
 
+## [v2026.02.15.2] - 2026-02-15
+### Changed
+- **Architecture**: Completely restructured the 3-tier fallback system: Modern yt-dlp + Deno (Tier 1) -> WhyKnot Proxy (Tier 2) -> Native yt-dlp (Tier 3).
+- **Fallbacks**: Tier 1 now attempts resolution for ALL URLs by default.
+- **Domains**: Expanded default proxy domains to include `soundcloud.com` and `facebook.com`.
+- **Logic**: Updated tier escalation to be smarter, using cumulative failure tracking across all URLs.
+- **Logs**: Unified log filenames; redirector now logs to `wrapper.log`.
+- **Debug**: Massive expansion of debug logging across both Patcher and Redirector.
+
+### Added
+- **UI**: New startup prompt to optionally enable proxying for live domains (`twitch.tv`, `vrcdn.live`, etc.).
+- **Build**: Added automated Python source validation (syntax and name checks) to the build process.
+- **Build**: Improved `_internal` directory tracking and automated version synchronization in source files.
+
+### Fixed
+- **Build**: Fixed `$BuildType` variable ordering and regex matching for empty strings in `build.ps1`.
+- **Config**: Added migration logic to ensure existing configurations are updated with new default domains.
+- **Patcher**: Resolved a `NameError` in `load_config` and improved VRCX installation detection.
+
 ## [v2026.01.19.9] - 2026-01-19
 ### Changed
 - **Documentation**: Comprehensive refresh of `README.md` to match the latest server features and world detection logic.

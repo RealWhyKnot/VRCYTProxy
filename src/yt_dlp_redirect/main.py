@@ -181,7 +181,7 @@ def update_wrapper_success():
     except:
         pass
 
-def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, log_level=logging.INFO):
+def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, log_level=logging.INFO, timeout=None):
     """Launches a subprocess and captures its output."""
     if not os.path.exists(path):
         logger.error(f"Executable not found: {path}")
@@ -206,7 +206,14 @@ def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, l
             env=env,
             creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
         )
-        stdout, stderr = process.communicate()
+        
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            logger.warning(f"TIMEOUT: {executable_name} took longer than {timeout}s")
+            return None, -1
 
         if stderr and log_level == logging.DEBUG:
             logger.debug(f"{executable_name} stderr: {stderr.strip()}")
@@ -220,6 +227,39 @@ def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, l
         logger.error(f"Execution of {executable_name} failed: {e}")
         logger.error(traceback.format_exc())
         return None, 1
+
+def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base):
+    """Tier 2/Last Resort: Resolve via WhyKnot.dev proxy."""
+    logger.info(f"Resolving via Proxy: {target_url}...")
+    try:
+        video_type = "va"
+        for i, arg in enumerate(incoming_args):
+            if arg == "--format" and i + 1 < len(incoming_args):
+                if "bestaudio" in incoming_args[i+1]: video_type = "a"
+                break
+
+        resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
+        if custom_ua: resolve_url += f"&ua={quote_plus(custom_ua)}"
+
+        logger.debug(f"API Request: {resolve_url}")
+        req = urllib.request.Request(resolve_url, method='GET')
+        with urllib.request.urlopen(req, timeout=res_timeout) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode())
+                new_url = data.get("stream_url")
+                status = data.get("status", "ready")
+
+                if status == "failed":
+                    logger.info("Proxy resolution failed: Server reported status 'failed'.")
+                    return None
+                elif new_url:
+                    logger.info(f"Proxy resolution success: {new_url} (Status: {status})")
+                    return new_url
+            else:
+                logger.info(f"Proxy resolution failed: HTTP {response.status}")
+    except Exception as e:
+        logger.info(f"Proxy resolution failed: {e}")
+    return None
 
 def process_and_execute(incoming_args):
     """3-Tier fallback logic (Modern -> Proxy -> Native)."""
@@ -325,7 +365,8 @@ def process_and_execute(incoming_args):
 
             resolved_url, return_code = attempt_executable(
                 LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, tier_1_args,
-                use_custom_temp_dir=True, log_level=logging.DEBUG
+                use_custom_temp_dir=True, log_level=logging.DEBUG,
+                timeout=res_timeout
             )
 
             if return_code == 0 and resolved_url and resolved_url.startswith('http'):
@@ -339,38 +380,14 @@ def process_and_execute(incoming_args):
 
         # --- TIER 2: PROXY (WhyKnot.dev) ---
         if forced_tier <= 1 and t2_proxy_enabled:
-            logger.info(f"Tier 2 [PROXY]: Resolving {target_url}...")
-            try:
-                video_type = "va"
-                for i, arg in enumerate(incoming_args):
-                    if arg == "--format" and i + 1 < len(incoming_args):
-                        if "bestaudio" in incoming_args[i+1]: video_type = "a"
-                        break
-
-                resolve_url = f"{REMOTE_SERVER_BASE}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
-                if custom_ua: resolve_url += f"&ua={quote_plus(custom_ua)}"
-
-                logger.debug(f"API Request: {resolve_url}")
-                req = urllib.request.Request(resolve_url, method='GET')
-                with urllib.request.urlopen(req, timeout=res_timeout) as response:
-                    if response.status == 200:
-                        data = json.loads(response.read().decode())
-                        new_url = data.get("stream_url")
-                        status = data.get("status", "ready")
-
-                        if status == "failed":
-                            logger.info("TIER 2 FAILED: Server reported status 'failed'.")
-                            forced_tier = 2
-                        elif new_url:
-                            logger.info(f"TIER 2 SUCCESS: {new_url} (Status: {status})")
-                            update_wrapper_success()
-                            safe_print(new_url)
-                            return 0
-                    else:
-                        logger.info(f"TIER 2 FAILED: HTTP {response.status}")
-                        forced_tier = 2
-            except Exception as e:
-                logger.info(f"TIER 2 FAILED: {e}")
+            logger.info("Tier 2 [PROXY]: Resolving...")
+            new_url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, REMOTE_SERVER_BASE)
+            if new_url:
+                update_wrapper_success()
+                safe_print(new_url)
+                return 0
+            else:
+                logger.info("TIER 2 FAILED. Moving to Tier 3.")
                 forced_tier = 2
 
         # --- TIER 3: NATIVE (VRChat Original) ---
@@ -383,16 +400,25 @@ def process_and_execute(incoming_args):
             logger.info("Tier 3 [NATIVE]: Resolving...")
             final_output, return_code = attempt_executable(
                 ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args,
-                log_level=logging.DEBUG
+                log_level=logging.DEBUG,
+                timeout=res_timeout
             )
 
             if return_code == 0 and final_output:
                 logger.info(f"TIER 3 SUCCESS")
                 safe_print(final_output)
                 return 0
-            else:
-                logger.warning(f"ALL TIERS FAILED: {target_url}")
-                sys.stderr.write(f"Wrapper Error: All tiers failed.\n")
+            
+            # LAST RESORT: Try proxy if native fails
+            logger.warning(f"Tier 3 failed. Attempting Proxy Last Resort...")
+            new_url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, REMOTE_SERVER_BASE)
+            if new_url:
+                logger.info("LAST RESORT SUCCESS")
+                safe_print(new_url)
+                return 0
+
+            logger.warning(f"ALL TIERS FAILED: {target_url}")
+            sys.stderr.write(f"Wrapper Error: All tiers failed.\n")
 
         return return_code
     except Exception as e:

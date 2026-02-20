@@ -514,7 +514,7 @@ if __name__ == "__main__":
 
     Write-Host "   -> Syntax Check..." -NoNewline
     $SyntaxScript = (Join-Path $BuildDir "syntax_check.py")
-    $SrcRoot = $SrcPatcherDir.Parent.FullName
+    $SrcRoot = Split-Path $SrcPatcherDir -Parent
     & $VenvPython "$SyntaxScript" "$SrcRoot"
     if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
     Write-Host " PASSED" -ForegroundColor Gray

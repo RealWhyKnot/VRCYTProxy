@@ -167,24 +167,42 @@ try {
     $SyntaxCheckCode = @"
 import sys
 import py_compile
+import ast
 from pathlib import Path
 
 def check_syntax(directory):
+    print(f"Deep checking syntax in {directory}...")
     success = True
-    for path in Path(directory).rglob('*.py'):
-        if '.venv' in str(path) or 'build' in str(path) or 'dist' in str(path):
+    for path in Path(directory).rglob("*.py"):
+        if any(x in str(path) for x in [".old", ".venv", "node_modules", "__pycache__", "build", "dist"]):
             continue
+            
+        # 1. Bytecode compilation check
         try:
             py_compile.compile(str(path), doraise=True)
         except py_compile.PyCompileError as e:
-            print(f'Syntax Error in {path}:\n{e}')
+            print(f"\n[FAIL] Bytecode Compilation Error in {path}:")
+            print(e)
+            success = False
+            continue
+            
+        # 2. AST Parsing check (Extremely strict on indentation and structure)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                ast.parse(f.read())
+        except SyntaxError as e:
+            print(f"\n[FAIL] AST Syntax Error in {path}:")
+            print(f"  Line {e.lineno}: {e.msg}")
+            if e.text:
+                print(f"  Code: {e.text.strip()}")
             success = False
         except Exception as e:
-            print(f'Error checking {path}: {e}')
+            print(f"\n[FAIL] Unexpected parsing error in {path}: {e}")
             success = False
+            
     return success
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import os
     src_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.getcwd())
     if not check_syntax(src_dir):
@@ -197,192 +215,302 @@ if __name__ == '__main__':
     $NameCheckCode = @"
 import ast
 import sys
-import builtins
+import os
 from pathlib import Path
 
-PYTHON_GLOBALS = {
-    '__name__', '__file__', '__doc__', '__package__', '__loader__', '__spec__', '__annotations__', '__builtins__'
-}
+class NameChecker(ast.NodeVisitor):
+    def __init__(self, filename, content):
+        self.filename = filename
+        self.content_lines = content.splitlines()
+        self.errors = []
+        # Stack of scopes. Each scope is a set of defined names.
+        self.scopes = [set()]
+        
+        # Add common builtins
+        import builtins
+        self.scopes[0].update(dir(builtins))
+        self.scopes[0].update(['__file__', '__name__', 'True', 'False', 'None', 'classmethod', 'staticmethod', 'property', 'id', 'next', 'iter', 'len', 'range', 'enumerate', 'any', 'all', 'sum', 'min', 'max', 'sorted', 'round', 'float', 'int', 'str', 'dict', 'list', 'set', 'bool', 'Exception', 'ValueError', 'TypeError', 'StopIteration', 'ImportError', 'FileNotFoundError'])
 
-class DefinitionCollector(ast.NodeVisitor):
-    def __init__(self):
-        self.globals = set()
+    def define_globals(self, tree):
+        """First pass: find all globally defined names."""
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.define(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    self._handle_assignment_target(target)
+            elif isinstance(node, ast.AnnAssign):
+                self._handle_assignment_target(node.target)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    self.define(alias.asname or alias.name.split('.')[0])
+
+    def error(self, node, msg):
+        line = node.lineno
+        col = node.col_offset
+        text = self.content_lines[line-1] if line <= len(self.content_lines) else ""
+        self.errors.append(f"{self.filename}:{line}:{col}: {msg}\n  -> {text.strip()}")
+
+    def define(self, name):
+        self.scopes[-1].add(name)
+
+    def is_defined(self, name):
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return True
+        return False
 
     def visit_Import(self, node):
         for alias in node.names:
-            name = alias.asname or alias.name.split('.')[0]
-            self.globals.add(name)
+            self.define(alias.asname or alias.name.split('.')[0])
+        self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
         for alias in node.names:
-            name = alias.asname or alias.name
-            self.globals.add(name)
-
-    def visit_FunctionDef(self, node):
-        self.globals.add(node.name)
-
-    def visit_AsyncFunctionDef(self, node):
-        self.globals.add(node.name)
+            self.define(alias.asname or alias.name)
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node):
-        self.globals.add(node.name)
-
-    def visit_Assign(self, node):
-        for target in node.targets:
-            self._collect_targets(target)
-
-    def _collect_targets(self, target):
-        if isinstance(target, ast.Name):
-            self.globals.add(target.id)
-        elif isinstance(target, (ast.Tuple, ast.List)):
-            for elt in target.elts:
-                self._collect_targets(elt)
-
-class NameCheckVisitor(ast.NodeVisitor):
-    def __init__(self, global_names):
-        self.scopes = [global_names | set(dir(builtins)) | PYTHON_GLOBALS]
-        self.undefined = []
-
-    def visit_Import(self, node):
-        for alias in node.names:
-            name = alias.asname or alias.name.split('.')[0]
-            self.scopes[-1].add(name)
-
-    def visit_ImportFrom(self, node):
-        for alias in node.names:
-            name = alias.asname or alias.name
-            self.scopes[-1].add(name)
+        self.define(node.name)
+        # Class body is a new scope
+        self.scopes.append(set())
+        self.generic_visit(node)
+        self.scopes.pop()
 
     def visit_FunctionDef(self, node):
-        self.scopes[-1].add(node.name)
+        self.define(node.name)
+        # Function arguments define names in the new scope
         new_scope = set()
-        for arg in node.args.args: new_scope.add(arg.arg)
+        for arg in node.args.args:
+            new_scope.add(arg.arg)
         if node.args.vararg: new_scope.add(node.args.vararg.arg)
         if node.args.kwarg: new_scope.add(node.args.kwarg.arg)
-        for arg in node.args.kwonlyargs: new_scope.add(arg.arg)
-        for arg in node.args.posonlyargs: new_scope.add(arg.arg)
+        
         self.scopes.append(new_scope)
-        for dec in node.decorator_list: self.visit(dec)
-        for stmt in node.body: self.visit(stmt)
+        self.generic_visit(node)
         self.scopes.pop()
 
     def visit_AsyncFunctionDef(self, node):
         self.visit_FunctionDef(node)
 
-    def visit_ClassDef(self, node):
-        self.scopes[-1].add(node.name)
+    def visit_Lambda(self, node):
+        # Lambda is a new scope
         self.scopes.append(set())
-        for dec in node.decorator_list: self.visit(dec)
-        for base in node.bases: self.visit(base)
-        for keyword in node.keywords: self.visit(keyword.value)
-        for stmt in node.body: self.visit(stmt)
+        for arg in node.args.args:
+            self.define(arg.arg)
+        if node.args.vararg: self.define(node.args.vararg.arg)
+        if node.args.kwarg: self.define(node.args.kwarg.arg)
+        self.generic_visit(node)
         self.scopes.pop()
 
-    def visit_Name(self, node):
-        if isinstance(node.ctx, ast.Store):
-            self.scopes[-1].add(node.id)
-        elif isinstance(node.ctx, ast.Load):
-            found = False
-            for scope in reversed(self.scopes):
-                if node.id in scope:
-                    found = True
-                    break
-            if not found:
-                self.undefined.append((node.id, node.lineno))
+    def visit_ListComp(self, node):
+        self._visit_comp(node)
 
-    def visit_ExceptHandler(self, node):
-        if node.name: self.scopes[-1].add(node.name)
+    def visit_SetComp(self, node):
+        self._visit_comp(node)
+
+    def visit_DictComp(self, node):
+        self._visit_comp(node)
+
+    def visit_GeneratorExp(self, node):
+        self._visit_comp(node)
+
+    def _visit_comp(self, node):
+        # Comprehensions are their own scope in Python 3
+        self.scopes.append(set())
+        # First visit the generators to define iteration variables
+        for gen in node.generators:
+            self._handle_assignment_target(gen.target)
+            self.visit(gen.iter)
+            for if_clause in gen.ifs:
+                self.visit(if_clause)
+        
+        # Then visit the body (elt or key/value)
+        if hasattr(node, 'elt'):
+            self.visit(node.elt)
+        if hasattr(node, 'key'):
+            self.visit(node.key)
+        if hasattr(node, 'value'):
+            self.visit(node.value)
+
+        self.scopes.pop()
+
+    def visit_Assign(self, node):
+        for target in node.targets:
+            self._handle_assignment_target(target)
         self.generic_visit(node)
 
-    def visit_With(self, node):
-        for item in node.items:
-            self.visit(item.context_expr)
-            if item.optional_vars: self._define_target(item.optional_vars)
-        for stmt in node.body: self.visit(stmt)
+    def visit_AnnAssign(self, node):
+        self._handle_assignment_target(node.target)
+        self.generic_visit(node)
 
     def visit_For(self, node):
-        self.visit(node.iter)
-        self._define_target(node.target)
-        for stmt in node.body: self.visit(stmt)
-        for stmt in node.orelse: self.visit(stmt)
+        self._handle_assignment_target(node.target)
+        self.generic_visit(node)
 
     def visit_AsyncFor(self, node):
         self.visit_For(node)
 
-    def _define_target(self, target):
+    def visit_With(self, node):
+        for item in node.items:
+            if item.optional_vars:
+                self._handle_assignment_target(item.optional_vars)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node):
+        self.visit_With(node)
+
+    def _handle_assignment_target(self, target):
         if isinstance(target, ast.Name):
-            self.scopes[-1].add(target.id)
+            self.define(target.id)
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for elt in target.elts: self._define_target(elt)
+            for elt in target.elts:
+                self._handle_assignment_target(elt)
 
-    def visit_ListComp(self, node):
-        self.scopes.append(set())
-        for gen in node.generators:
-            self.visit(gen.iter)
-            self._define_target(gen.target)
-            for if_clause in gen.ifs: self.visit(if_clause)
-        self.visit(node.elt)
-        self.scopes.pop()
+    def visit_Name(self, node):
+        # Only check names being loaded (used), not ones being stored (defined)
+        if isinstance(node.ctx, ast.Load):
+            if not self.is_defined(node.id):
+                self.error(node, f"Undefined name '{node.id}'")
+        self.generic_visit(node)
 
-    def visit_SetComp(self, node):
-        self.visit_ListComp(node)
-
-    def visit_GeneratorExp(self, node):
-        self.visit_ListComp(node)
-
-    def visit_DictComp(self, node):
-        self.scopes.append(set())
-        for gen in node.generators:
-            self.visit(gen.iter)
-            self._define_target(gen.target)
-            for if_clause in gen.ifs: self.visit(if_clause)
-        self.visit(node.key)
-        self.visit(node.value)
-        self.scopes.pop()
-
-    def visit_Lambda(self, node):
-        new_scope = set()
-        for arg in node.args.args: new_scope.add(arg.arg)
-        self.scopes.append(new_scope)
-        self.visit(node.body)
-        self.scopes.pop()
+    # Specific handling for try-except blocks
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.define(node.name)
+        self.generic_visit(node)
 
 def check_file(path):
-    with open(path, 'r', encoding='utf-8') as f:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        tree = ast.parse(content)
+        checker = NameChecker(path.name, content)
+        checker.define_globals(tree)
+        checker.visit(tree)
+        return checker.errors
+    except Exception as e:
+        return [f"ERROR PARSING {path.name}: {e}"]
+
+def run_name_checks(directory):
+    print(f"Deep checking names and variables in {directory}...")
+    root = Path(directory)
+    all_errors = {}
+
+    for path in root.rglob("*.py"):
+        if any(x in str(path) for x in [".old", ".venv", "node_modules", "__pycache__", "build", "dist"]):
+            continue
+
+        errors = check_file(path)
+        if errors:
+            all_errors[str(path)] = errors
+
+    if all_errors:
+        print("\n[CRITICAL] Undefined names found!")
+        for path, errors in all_errors.items():
+            print(f"\nFile: {path}")
+            for err in errors:
+                print(f"  - {err}")
+        return False
+    
+    print("[SUCCESS] No undefined names found.")
+    return True
+
+if __name__ == "__main__":
+    import os
+    src_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.getcwd())
+    if not run_name_checks(src_dir):
+        sys.exit(1)
+    sys.exit(0)
+"@
+    $NameCheckCode | Out-File -FilePath (Join-Path $BuildDir "name_check.py") -Encoding utf8
+
+    # 3. Import and Symbol Check
+    $ImportCheckCode = @"
+import sys
+import os
+import ast
+from pathlib import Path
+
+def get_defined_names(tree):
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            names.add(elt.id)
+    return names
+
+def check_file_static_symbols(file_path, project_root):
+    with open(file_path, "r", encoding="utf-8") as f:
         try:
             tree = ast.parse(f.read())
         except Exception as e:
-            return [f'AST Parse Error: {e}']
+            return [f"AST Parse Error: {e}"]
 
-    collector = DefinitionCollector()
-    for node in tree.body: collector.visit(node)
-    
-    visitor = NameCheckVisitor(collector.globals)
-    visitor.visit(tree)
-    
     errors = []
-    seen = set()
-    for name, line in visitor.undefined:
-        if (name, line) not in seen:
-            errors.append(f"Undefined name '{name}' at line {line}")
-            seen.add((name, line))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if not node.module: continue
+            
+            # Resolve the module path
+            module_path = None
+            if node.level > 0:
+                # Relative
+                path = Path(file_path).parent
+                for _ in range(node.level - 1):
+                    path = path.parent
+                if node.module:
+                    path = path.joinpath(*node.module.split("."))
+                module_path = path
+            else:
+                # Absolute - check if it's in src
+                path = project_root.joinpath(*node.module.split("."))
+                if path.with_suffix(".py").exists() or (path.is_dir() and path.joinpath("__init__.py").exists()):
+                    module_path = path
+
+            if not module_path: continue
+
+            target_file = None
+            if module_path.with_suffix(".py").exists():
+                target_file = module_path.with_suffix(".py")
+            elif module_path.is_dir() and module_path.joinpath("__init__.py").exists():
+                target_file = module_path.joinpath("__init__.py")
+
+            if target_file:
+                with open(target_file, "r", encoding="utf-8") as f_target:
+                    try:
+                        target_tree = ast.parse(f_target.read())
+                        existing_names = get_defined_names(target_tree)
+                        
+                        for alias in node.names:
+                            if alias.name == "*": continue
+                            if alias.name not in existing_names:
+                                errors.append(f"Symbol '{alias.name}' not found in '{node.module}'")
+                    except: pass
     return errors
 
-if __name__ == '__main__':
-    import os
-    root_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.getcwd())
+if __name__ == "__main__":
+    src_dir = Path(sys.argv[1])
+    project_root = src_dir.parent
     success = True
-    for path in root_dir.rglob('*.py'):
-        if any(x in str(path) for x in ['.old', '.venv', 'build', 'dist']): continue
-        errs = check_file(path)
+    for path in src_dir.rglob("*.py"):
+        if any(x in str(path) for x in [".old", ".venv", "build", "dist"]): continue
+        errs = check_file_static_symbols(path, src_dir)
         if errs:
-            print(f'\n[FAIL] {path}')
-            for e in errs: print(f'  - {e}')
+            print(f"\n[FAIL] {path}")
+            for e in errs: print(f"  - {e}")
             success = False
     if not success: sys.exit(1)
     sys.exit(0)
 "@
-    $NameCheckCode | Out-File -FilePath (Join-Path $BuildDir "name_check.py") -Encoding utf8
+    $ImportCheckCode | Out-File -FilePath (Join-Path $BuildDir "import_check.py") -Encoding utf8
 
     Write-Host "   -> Syntax Check..." -NoNewline
     $SyntaxScript = (Join-Path $BuildDir "syntax_check.py")
@@ -394,6 +522,12 @@ if __name__ == '__main__':
     Write-Host "   -> Name Check..." -NoNewline
     $NameScript = (Join-Path $BuildDir "name_check.py")
     & $VenvPython "$NameScript" "$SrcRoot"
+    if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
+    Write-Host " PASSED" -ForegroundColor Gray
+
+    Write-Host "   -> Import/Symbol Check..." -NoNewline
+    $ImportScript = (Join-Path $BuildDir "import_check.py")
+    & $VenvPython "$ImportScript" "$SrcRoot"
     if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
     Write-Host " PASSED" -ForegroundColor Gray
 

@@ -14,7 +14,7 @@ from urllib.parse import quote_plus
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.17.dev-main-189ba2d" # Updated by build script
+WRAPPER_VERSION = "v2026.02.20.dev-main-2829d98" # Updated by build script
 BUILD_TYPE = "DEV" # Updated by build script
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"
@@ -314,7 +314,7 @@ def process_and_execute(incoming_args):
                         # DETECTION LOGIC: If called again within the window, assume playback failure        
                         if current_time - last_req < retry_window:
                             forced_tier = min(current_tier + 1, 3) # Cap at Tier 3
-                            logger.info(f"RAPID RETRY DETECTED (Î”{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
+                            logger.info(f"RAPID RETRY DETECTED (ÃŽâ€{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
                         else:
                             if current_time < failed_info.get('expiry', 0):
                                 forced_tier = failed_info.get('tier', 0)

@@ -191,9 +191,9 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
             if arg == "--format" and i + 1 < len(incoming_args):
                 if "bestaudio" in incoming_args[i+1]: video_type = "a"
                 break
-        player_hint = "avpro"
-        if "UnityPlayer" in (custom_ua or ""):
-            player_hint = "unity"
+        # Detect legacy players to provide the correct hint to the proxy
+        is_legacy = any(x in (custom_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"])
+        player_hint = "unity" if is_legacy else "avpro"
         
         resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}&player={player_hint}"
         logger.debug(f"Proxy API Request: {resolve_url}")

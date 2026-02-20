@@ -14,8 +14,8 @@ from urllib.parse import quote_plus
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.15.dev-main-aa72022" # Updated by build script
-BUILD_TYPE = "" # Updated by build script
+WRAPPER_VERSION = "v2026.02.17.dev-main-189ba2d" # Updated by build script
+BUILD_TYPE = "DEV" # Updated by build script
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"
 WRAPPER_STATE_NAME = "wrapper_state.json"
@@ -238,21 +238,32 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
                 if "bestaudio" in incoming_args[i+1]: video_type = "a"
                 break
 
-        resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}"
-        if custom_ua: resolve_url += f"&ua={quote_plus(custom_ua)}"
+        # Check if we should hint for Unity player
+        player_hint = "avpro"
+        ua = custom_ua or ""
+        if "UnityPlayer" in ua:
+            player_hint = "unity"
 
+        resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}&player={player_hint}"
+        
         logger.debug(f"API Request: {resolve_url}")
         req = urllib.request.Request(resolve_url, method='GET')
+        # We must forward our UA so the backend can detect player type if not hinted
+        if ua: req.add_header("User-Agent", ua)
+
         with urllib.request.urlopen(req, timeout=res_timeout) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
-                new_url = data.get("stream_url")
                 status = data.get("status", "ready")
-
-                if status == "failed":
-                    logger.info("Proxy resolution failed: Server reported status 'failed'.")
-                    return None
-                elif new_url:
+                
+                if status == "transcoding":
+                    # If transcoding, we use the /play endpoint which long-polls
+                    new_url = data.get("url")
+                    logger.info(f"Proxy reported TRANSCODING. Using long-poll URL: {new_url}")
+                    return new_url
+                
+                new_url = data.get("stream_url") or data.get("url")
+                if new_url:
                     logger.info(f"Proxy resolution success: {new_url} (Status: {status})")
                     return new_url
             else:
@@ -303,7 +314,7 @@ def process_and_execute(incoming_args):
                         # DETECTION LOGIC: If called again within the window, assume playback failure        
                         if current_time - last_req < retry_window:
                             forced_tier = min(current_tier + 1, 3) # Cap at Tier 3
-                            logger.info(f"RAPID RETRY DETECTED (Δ{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
+                            logger.info(f"RAPID RETRY DETECTED (Î”{current_time - last_req:.1f}s). Escalating: Tier {current_tier} -> {forced_tier}")
                         else:
                             if current_time < failed_info.get('expiry', 0):
                                 forced_tier = failed_info.get('tier', 0)

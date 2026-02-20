@@ -18,5 +18,6 @@
   "debug_mode": true,
   "force_patch_in_public": false,
   "auto_update_check": true,
+  "wrapper_version": "v2026.02.20.dev-production-f187016",
   "vrchat_log_dir": "C:\\Users\\ADMIN\\AppData\\LocalLow\\VRChat\\VRChat"
 }

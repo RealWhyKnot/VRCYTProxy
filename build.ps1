@@ -22,14 +22,16 @@ Write-Host ""
 
 if (-not $Version) {
     Write-Host "Version argument not provided. Generating dynamic version..." -ForegroundColor Yellow
-    $DateStr = Get-Date -Format "yyyy.MM.dd"
-    $GitHash = & git rev-parse --short HEAD 2>$null
-    $GitBranch = & git rev-parse --abbrev-ref HEAD 2>$null
     
-    if ($GitHash -and $GitBranch) {
-        $Version = "v$DateStr.dev-$GitBranch-$GitHash"
+    # Get the latest commit message which contains the version (e.g. v2026.02.20.20)
+    $LatestCommit = & git log -1 --pretty=%B 2>$null
+    if ($LatestCommit -match "^v\d{4}\.\d{2}\.\d{2}\.\d+") {
+        $Version = "$($LatestCommit.Trim()).dev"
     } else {
-        $Version = "v$DateStr.dev-local"
+        # Fallback if commit message doesn't match format
+        $DateStr = Get-Date -Format "yyyy.MM.dd"
+        $GitHash = & git rev-parse --short HEAD 2>$null
+        $Version = "v$DateStr.dev-$GitHash"
     }
 }
 

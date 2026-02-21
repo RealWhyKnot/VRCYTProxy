@@ -33,10 +33,12 @@ if (-not $Version) {
     Write-Host "Version argument not provided. Generating dynamic version..." -ForegroundColor Yellow
     
     # Get the latest commit message which contains the version (e.g. v2026.02.20.20)
-    $LatestCommit = & git log -1 --pretty=%B 2>$null
+    $RawCommit = & git log -1 --pretty=%B 2>$null
+    $LatestCommit = [string]::Join(" ", $RawCommit).Trim()
+    
     if ($LatestCommit -match "^v\d{4}\.\d{2}\.\d{2}\.\d+") {
         # Use only the matched version part and ensure no spaces
-        $Version = "$($Matches[0].Trim()).dev"
+        $Version = "$($Matches[0]).dev"
     } else {
         # Fallback if commit message doesn't match format
         $DateStr = Get-Date -Format "yyyy.MM.dd"

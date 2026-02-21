@@ -191,36 +191,47 @@ def verify_stream(url, timeout=3.0):
             
             # If it's a direct video file, we're likely good
             content_type = resp.headers.get('Content-Type', '').lower()
-            if 'video/' in content_type or 'audio/' in content_type:
+            if 'video/' in content_type or 'audio/' in content_type or 'application/octet-stream' in content_type:
                 return True
         
         # 2. Manifest Deep Check (for M3U8/DASH)
-        if '.m3u8' in url.lower() or '.mpd' in url.lower() or 'manifest' in url.lower():
+        is_manifest = any(x in url.lower() for x in ['.m3u8', '.mpd', 'manifest'])
+        if is_manifest:
             logger.debug(f"Deep-verifying manifest: {url[:50]}...")
             req_get = urllib.request.Request(url, method='GET')
             req_get.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             with urllib.request.urlopen(req_get, timeout=timeout) as resp:
-                content = resp.read().decode('utf-8', errors='ignore')
+                raw_content = resp.read()
+                content = raw_content.decode('utf-8', errors='ignore').strip()
                 
-                # Look for a segment URL (usually ends in .ts, .m4s, or is a relative path)
+                # Validation: Manifest MUST NOT be HTML
+                if content.startswith('<!DOCTYPE') or '<html' in content.lower():
+                    logger.warning("Manifest deep-check received HTML instead of stream data.")
+                    return False
+                
+                # Validation: Check for common manifest headers
+                if not any(x in content for x in ['#EXTM3U', 'MPD', 'Playlist']):
+                    logger.debug("Content does not look like a valid manifest.")
+                    return False
+
+                # Look for a segment URL
                 lines = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
                 if lines:
                     segment_url = lines[0]
-                    # Handle relative URLs
                     if not segment_url.startswith('http'):
                         from urllib.parse import urljoin
                         segment_url = urljoin(url, segment_url)
                     
-                    # Verify the first segment is reachable
+                    # Verify the first segment
                     seg_req = urllib.request.Request(segment_url, method='HEAD')
                     seg_req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     with urllib.request.urlopen(seg_req, timeout=timeout) as seg_resp:
                         return seg_resp.status < 400
                 else:
-                    logger.warning("Manifest appears to be empty or invalid.")
+                    logger.warning("Manifest is empty (no segments).")
                     return False
         
-        return True # Default success if we can't deep-check further
+        return True 
     except Exception as e:
         logger.debug(f"Stream Verification FAILED: {e}")
         return False
@@ -302,7 +313,7 @@ def resolve_tier_1_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=
                 logger.info(f"Tier 1 SUCCESS (Proxy): {url[:100]}...")
                 return {"tier": 1, "url": url}
             else:
-                logger.warning("Tier 1 (Proxy) failed deep verification.")
+                logger.warning("WINNER: Tier 1 (Proxy) FAILED Deep Verification.")
         else:
             logger.debug("Tier 1 (Proxy) failed to resolve.")
     except Exception as e: 

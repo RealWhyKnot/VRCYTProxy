@@ -298,30 +298,44 @@ SECURE_BACKUP_PATH = None
 REDIRECTOR_LOG_PATH = None
 WRAPPER_STATE_PATH = None
 
-def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active_player=None):
+def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active_player=None, failed_tier=None):
     try:
-        state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown'}
+        state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown', 'domain_blacklist': {}}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
-                logger.debug("Successfully loaded existing wrapper state.")
-            except Exception as e:
-                logger.debug(f"Failed to load wrapper state: {e}")
+            except Exception: pass
         
         if 'failed_urls' not in state: state['failed_urls'] = {}
+        if 'domain_blacklist' not in state: state['domain_blacklist'] = {}
         
         if active_player:
             state['active_player'] = active_player
+            if active_player == 'unknown':
+                # Reset blacklists on world change for a clean session
+                state['domain_blacklist'] = {}
+                logger.debug("Instance changed: Cleared domain blacklists.")
 
         if is_broken:
             count = state.get('consecutive_errors', 0) + 1
             state['consecutive_errors'] = count
-            logger.debug(f"Handling failure #{count}")
             
             if failed_url:
-                # Store the URL and when it failed. We block it for a while.
-                existing = state.get('failed_urls', {}).get(failed_url, {})
+                # 1. Domain Blacklisting Logic
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(failed_url).netloc.lower()
+                    if domain:
+                        if domain not in state['domain_blacklist']:
+                            state['domain_blacklist'][domain] = []
+                        if failed_tier and failed_tier not in state['domain_blacklist'][domain]:
+                            state['domain_blacklist'][domain].append(failed_tier)
+                            logger.warning(f"Domain '{domain}' blacklisted for Tier {failed_tier} this session.")
+                except Exception: pass
+
+                # 2. URL Escalation Logic
+                existing = state['failed_urls'].get(failed_url, {})
                 current_tier = existing.get('tier', 0)
                 new_tier = min(current_tier + 1, 3)
                 
@@ -333,10 +347,9 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active
                 
                 # IMPORTANT: Clear cache for this failed URL!
                 if 'cache' in state and failed_url in state['cache']:
-                    logger.debug(f"Clearing cache entry for failing URL: {failed_url[:50]}...")
                     del state['cache'][failed_url]
 
-                logger.warning(f"URL Failed: {failed_url[:50]}... Escalating to Tier {new_tier + 1} for this URL.")
+                logger.warning(f"URL Failed: {failed_url[:50]}... Escalating to Tier {new_tier + 1}.")
             else:
                 state['force_fallback'] = True
                 if duration:
@@ -413,7 +426,7 @@ def check_wrapper_health(wrapper_file_list):
         logger.debug(f"Health check failed: {e}")
     return False
 
-def tail_log_file(log_path, stop_event):
+def tail_log_file(log_path, stop_event, monitor=None):
     logger.info(f"Starting to monitor wrapper log: {log_path}")
     last_pos = 0
     try:
@@ -432,6 +445,11 @@ def tail_log_file(log_path, stop_event):
                         if new_lines:
                             for line in new_lines:
                                 logger.info(f"[Redirector] {line.strip()}")
+                                if monitor and "WINNER: Tier" in line:
+                                    m = re.search(r'Tier (\d+)', line)
+                                    if m:
+                                        monitor.last_winner_tier = int(m.group(1))
+                                        logger.debug(f"Patcher tracked Winner: Tier {monitor.last_winner_tier}")
                             last_pos = f.tell()
         except Exception: pass
         time.sleep(1.0)
@@ -839,6 +857,7 @@ class LogMonitor:
         self.proxy_domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         self.error_patterns = CONFIG.get("video_error_patterns", [])
         self.last_attempted_url = None
+        self.last_winner_tier = None # Track which tier won last
         self.is_initial_scan = False
         
         # Track mapping from resolved URL -> Source URL for escalation
@@ -933,7 +952,7 @@ class LogMonitor:
                                             except Exception: pass
                                         
                                         target_to_block = original_url if original_url else self.last_attempted_url
-                                        update_wrapper_state(is_broken=True, failed_url=target_to_block)
+                                        update_wrapper_state(is_broken=True, failed_url=target_to_block, failed_tier=self.last_winner_tier)
                                     else:
                                         logger.info(f"Detected Video Error (No URL found): {line.strip()}")
                                 else:
@@ -1150,13 +1169,13 @@ def main():
         input("Press Enter to exit..."); sys.exit(1)
 
     stop_event = threading.Event()
-    
-    # Start Redirector Log Thread
-    log_tail_thread = threading.Thread(target=tail_log_file, args=(REDIRECTOR_LOG_PATH, stop_event), daemon=True)
-    log_tail_thread.start()
 
     # Start VRChat Log Monitor Thread
     monitor = LogMonitor()
+    
+    # Start Redirector Log Thread (Moved after monitor creation)
+    log_tail_thread = threading.Thread(target=tail_log_file, args=(REDIRECTOR_LOG_PATH, stop_event, monitor), daemon=True)
+    log_tail_thread.start()
     
     logger.debug(f"Patcher Base Path: {APP_BASE_PATH}")
     logger.debug(f"Source Wrapper Dir: {SOURCE_WRAPPER_DIR}")

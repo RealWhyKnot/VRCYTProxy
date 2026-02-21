@@ -327,13 +327,13 @@ def resolve_tier_3_native(incoming_args, res_timeout=15.0):
 def process_and_execute(incoming_args):
     try:
         # --- DEBUG LOGGING ---
-        logger.info(f"--- PARALLEL WRAPPER START ({WRAPPER_VERSION}) ---")
+        logger.info(f"--- RESOLVER START ({WRAPPER_VERSION}) ---")
         
         # Verify Critical Dependencies
         if not os.path.exists(LATEST_YTDLP_PATH):
-            logger.error(f"CRITICAL: Tier 1 executable missing at {LATEST_YTDLP_PATH}")
+            logger.debug(f"Tier 1 executable missing at {LATEST_YTDLP_PATH}")
         if not os.path.exists(os.path.join(APP_BASE_PATH, "deno.exe")):
-            logger.warning("Tier 1 EJS dependency (deno.exe) is missing.")
+            logger.debug("Tier 1 EJS dependency (deno.exe) is missing.")
 
         logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
         

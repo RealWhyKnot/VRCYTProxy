@@ -42,7 +42,7 @@ class PatchState(Enum):
     DISABLED = auto()
     BROKEN = auto()
 
-POLL_INTERVAL = 3.0 
+POLL_INTERVAL = 1.0 
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
@@ -60,7 +60,6 @@ WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
 _console_handler_ref = None
 
 def calculate_sha256(filepath):
-    logger.debug(f"Calculating SHA256 for: {filepath}")
     if not os.path.exists(filepath):
         logger.debug(f"File does not exist for hashing: {filepath}")
         return None
@@ -70,7 +69,6 @@ def calculate_sha256(filepath):
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         res = sha256_hash.hexdigest()
-        logger.debug(f"SHA256 for {os.path.basename(filepath)}: {res[:12]}...")
         return res
     except Exception as e:
         logger.debug(f"Failed to calculate SHA256 for {filepath}: {e}")
@@ -301,7 +299,6 @@ REDIRECTOR_LOG_PATH = None
 WRAPPER_STATE_PATH = None
 
 def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active_player=None):
-    logger.debug(f"Updating wrapper state (Path: {WRAPPER_STATE_PATH})")
     try:
         state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown'}
         if os.path.exists(WRAPPER_STATE_PATH):
@@ -868,7 +865,6 @@ class LogMonitor:
                     f.seek(self.last_pos)
                     new_lines = f.readlines()
                     if new_lines:
-                        logger.debug(f"Read {len(new_lines)} new lines from log.")
                         self.last_pos = f.tell()
                         for line in new_lines:
                             # 1. Track Resolution Mapping (Source URL -> Resolved URL)

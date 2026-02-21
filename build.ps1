@@ -204,22 +204,11 @@ try {
 
     # Automatically update the hardcoded fallback version in patcher main.py
     if ($Version -and $Version -match "^v") {
-        $MainPyPath = Join-Path $SrcPatcherDir "main.py"
-        if (Test-Path $MainPyPath) {
-            Write-Host "   -> Updating hardcoded fallback version in patcher main.py to $Version..." -ForegroundColor Cyan
-            $MainPyContent = Get-Content $MainPyPath -Raw
-            $MainPyContent = $MainPyContent -replace 'CURRENT_VERSION = "v[^" ]+"', "CURRENT_VERSION = `"$Version`""
-            [System.IO.File]::WriteAllText($MainPyPath, $MainPyContent)
-        }
+        $VersionFile = Join-Path $SrcPatcherDir "_version.py"
         
-        $RedirectorMainPy = Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py"
-        if (Test-Path $RedirectorMainPy) {
-            Write-Host "   -> Updating hardcoded fallback version in redirector main.py to $Version..." -ForegroundColor Cyan
-            $RedirContent = Get-Content $RedirectorMainPy -Raw
-            $RedirContent = $RedirContent -replace 'WRAPPER_VERSION = "v[^" ]+"', "WRAPPER_VERSION = `"$Version`""
-            $RedirContent = $RedirContent -replace 'BUILD_TYPE = "[^" ]*"', "BUILD_TYPE = `"$BuildType`""
-            [System.IO.File]::WriteAllText($RedirectorMainPy, $RedirContent)
-        }
+        Write-Host "   -> Generating version file: $Version ($BuildType)"
+        "__version__ = '$Version'`n__build_type__ = '$BuildType'" | Out-File -FilePath $VersionFile -Encoding UTF8
+        Write-Host "      File created at: $VersionFile"
     }
 
     Write-Host "[2/6] Installing/Updating dependencies in Conda..." -ForegroundColor Green
@@ -275,16 +264,18 @@ try {
 
     Write-Host "   -> Building Redirector..." -ForegroundColor Cyan
     
+    $RedirectorSrcDir = Join-Path $PSScriptRoot "src\yt_dlp_redirect"
     $RedirectorArgs = @(
         "--noconfirm",
         "--noupx",
         "--distpath", $RedirectorBuildDir,
         "--workpath", $RedirectorWorkDir,
         "--specpath", $BuildDir,
-        "--name", "yt-dlp-wrapper"
+        "--name", "yt-dlp-wrapper",
+        "--paths", $RedirectorSrcDir
     )
     if ($IconArg) { $RedirectorArgs += $IconArg }
-    $RedirectorArgs += (Join-Path $PSScriptRoot "src\yt_dlp_redirect\main.py")
+    $RedirectorArgs += (Join-Path $RedirectorSrcDir "main.py")
 
     & $CondaCmd run -n $CondaEnvName python -m PyInstaller @RedirectorArgs
 
@@ -316,7 +307,8 @@ try {
         "--distpath", $PatcherBuildDir,
         "--workpath", $PatcherWorkDir,
         "--specpath", $BuildDir,
-        "--name", "patcher"
+        "--name", "patcher",
+        "--paths", $SrcPatcherDir
     )
     if ($IconArg) { $PatcherArgs += $IconArg }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")

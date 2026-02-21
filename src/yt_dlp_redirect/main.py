@@ -126,14 +126,24 @@ def find_url_in_args(args):
     return None
 
 def detect_legacy(incoming_args, custom_ua):
-    # Check for User-Agent in incoming args first
+    # Clue 1: Check for User-Agent in incoming args
     ua_in_args = None
     for i, arg in enumerate(incoming_args):
         if arg == "--user-agent" and i + 1 < len(incoming_args):
             ua_in_args = incoming_args[i+1]
             break
     effective_ua = ua_in_args or custom_ua
-    return any(x in (effective_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"])
+    if any(x in (effective_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"]):
+        return True
+
+    # Clue 2: Check for VRChat's specific legacy format pattern [protocol^=http]
+    # Unity player explicitly requests non-streaming protocols.
+    for arg in incoming_args:
+        if "protocol^=http" in arg or "protocol!*=m3u8" in arg:
+            logger.debug("Legacy player detected via format protocol restrictions.")
+            return True
+            
+    return False
 
 def check_proxy_online():
     try:

@@ -36,14 +36,16 @@ if (-not $Version) {
     $RawCommit = & git log -1 --pretty=%B 2>$null
     $LatestCommit = [string]::Join(" ", $RawCommit).Trim()
     
-    if ($LatestCommit -match "^v\d{4}\.\d{2}\.\d{2}\.\d+") {
+    if ($LatestCommit -match "(v\d{4}\.\d{2}\.\d{2}\.\d+)") {
         # Use only the matched version part and ensure no spaces
-        $Version = "$($Matches[0]).dev"
+        $Version = "$($Matches[1]).dev"
+        Write-Host "Detected version from git: $Version" -ForegroundColor Cyan
     } else {
         # Fallback if commit message doesn't match format
         $DateStr = Get-Date -Format "yyyy.MM.dd"
         $GitHash = & git rev-parse --short HEAD 2>$null
         $Version = "v$DateStr.dev-$GitHash"
+        Write-Host "Fallback version generated: $Version" -ForegroundColor Yellow
     }
 }
 

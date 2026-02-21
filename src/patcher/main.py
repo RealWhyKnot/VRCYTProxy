@@ -300,10 +300,10 @@ SECURE_BACKUP_PATH = None
 REDIRECTOR_LOG_PATH = None
 WRAPPER_STATE_PATH = None
 
-def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
+def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active_player=None):
     logger.debug(f"Updating wrapper state (Path: {WRAPPER_STATE_PATH})")
     try:
-        state = {'consecutive_errors': 0, 'failed_urls': {}}
+        state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown'}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
@@ -313,6 +313,9 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None):
                 logger.debug(f"Failed to load wrapper state: {e}")
         
         if 'failed_urls' not in state: state['failed_urls'] = {}
+        
+        if active_player:
+            state['active_player'] = active_player
 
         if is_broken:
             count = state.get('consecutive_errors', 0) + 1
@@ -888,11 +891,22 @@ class LogMonitor:
 
                             # 2. Catch URL Loading attempts to track what might fail
                             if "[AVProVideo] Opening" in line:
+                                self.last_attempted_url = None
                                 url_match = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
                                 if url_match:
                                     self.last_attempted_url = url_match.group(1).strip()
                                     if not self.is_initial_scan:
-                                        logger.debug(f"Detected video load attempt: {self.last_attempted_url}")
+                                        logger.debug(f"Detected AVPro load attempt: {self.last_attempted_url}")
+                                        update_wrapper_state(active_player='avpro')
+
+                            if "[VideoPlayer] Loading" in line or "[VideoPlayer] Opening" in line:
+                                self.last_attempted_url = None
+                                url_match = re.search(r'(?:Loading|Opening)\s+(https?://[^\s\)]+)', line)
+                                if url_match:
+                                    self.last_attempted_url = url_match.group(1).strip()
+                                    if not self.is_initial_scan:
+                                        logger.debug(f"Detected Unity load attempt: {self.last_attempted_url}")
+                                        update_wrapper_state(active_player='unity')
 
                             # 3. Catch Errors (ONLY if not in initial scan)
                             if any(x in line for x in self.error_patterns):

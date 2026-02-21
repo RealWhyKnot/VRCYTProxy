@@ -126,6 +126,18 @@ def find_url_in_args(args):
     return None
 
 def detect_legacy(incoming_args, custom_ua):
+    # Clue 0: Check Patcher's state for the current session
+    try:
+        if os.path.exists(WRAPPER_STATE_PATH):
+            with open(WRAPPER_STATE_PATH, 'r') as f:
+                state = json.load(f)
+                if state.get('active_player') == 'unity':
+                    logger.debug("Legacy player detected via Patcher state.")
+                    return True
+                if state.get('active_player') == 'avpro':
+                    return False
+    except: pass
+
     # Clue 1: Check for User-Agent in incoming args
     ua_in_args = None
     for i, arg in enumerate(incoming_args):
@@ -316,6 +328,13 @@ def process_and_execute(incoming_args):
     try:
         # --- DEBUG LOGGING ---
         logger.info(f"--- PARALLEL WRAPPER START ({WRAPPER_VERSION}) ---")
+        
+        # Verify Critical Dependencies
+        if not os.path.exists(LATEST_YTDLP_PATH):
+            logger.error(f"CRITICAL: Tier 1 executable missing at {LATEST_YTDLP_PATH}")
+        if not os.path.exists(os.path.join(APP_BASE_PATH, "deno.exe")):
+            logger.warning("Tier 1 EJS dependency (deno.exe) is missing.")
+
         logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
         
         # Log specific arguments of interest for diagnosis

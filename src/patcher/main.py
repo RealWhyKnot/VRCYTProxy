@@ -942,6 +942,8 @@ class LogMonitor:
                             if it and it != self.last_instance_type:
                                 logger.info(f"Instance changed: {self.last_instance_type} -> {it}")
                                 self.last_instance_type = it
+                                # Reset player type on world change to avoid stale state
+                                update_wrapper_state(active_player='unknown')
 
                         # After the first batch of lines is processed, we are no longer in initial scan
                         if self.is_initial_scan:

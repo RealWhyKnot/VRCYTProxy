@@ -167,16 +167,40 @@ def check_proxy_online():
         logger.debug(f"Proxy Online Check FAILED: {e}")
         return False
 
-def update_wrapper_success():
+def update_wrapper_success(target_url=None, resolved_url=None):
     try:
         if os.path.exists(WRAPPER_STATE_PATH):
             with open(WRAPPER_STATE_PATH, 'r') as f:
                 state = json.load(f)
+            
             state['consecutive_errors'] = 0
             state['force_fallback'] = False
+            
+            if target_url and resolved_url:
+                if 'cache' not in state: state['cache'] = {}
+                # Cache for 15 minutes
+                state['cache'][target_url] = {
+                    'url': resolved_url,
+                    'expiry': time.time() + 900
+                }
+                logger.debug(f"Cached resolution for: {target_url[:50]}...")
+
             with open(WRAPPER_STATE_PATH, 'w') as f:
                 json.dump(state, f)
     except: pass
+
+def verify_url(url, timeout=3.0):
+    """Checks if a URL is actually reachable via HEAD request."""
+    if not url: return False
+    try:
+        req = urllib.request.Request(url, method='HEAD')
+        # Add a common User-Agent to avoid being blocked by simple checks
+        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status < 400
+    except Exception as e:
+        logger.debug(f"URL Verification FAILED for {url[:50]}... : {e}")
+        return False
 
 def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, log_level=logging.INFO, timeout=10.0):
     if not os.path.exists(path): 
@@ -354,6 +378,29 @@ def process_and_execute(incoming_args):
             if final_output: safe_print(final_output)
             return return_code
 
+        # --- STEP 1: CACHE CHECK ---
+        try:
+            if os.path.exists(WRAPPER_STATE_PATH):
+                with open(WRAPPER_STATE_PATH, 'r') as f:
+                    state = json.load(f)
+                
+                cache = state.get('cache', {})
+                if target_url in cache:
+                    entry = cache[target_url]
+                    if current_time < entry.get('expiry', 0):
+                        cached_url = entry.get('url')
+                        logger.info(f"CACHE HIT: {target_url[:50]}...")
+                        # One final verification of the cached URL
+                        if verify_url(cached_url, timeout=2.0):
+                            safe_print(cached_url)
+                            return 0
+                        else:
+                            logger.debug("Cached URL expired or is now invalid.")
+                            del state['cache'][target_url]
+                            with open(WRAPPER_STATE_PATH, 'w') as wf: json.dump(state, wf)
+        except Exception as e:
+            logger.debug(f"Cache Check Error: {e}")
+
         t1_enabled = CONFIG.get("enable_tier1_modern", True)
         t2_enabled = CONFIG.get("enable_tier2_proxy", True)
         t3_enabled = CONFIG.get("enable_tier3_native", True)
@@ -364,68 +411,86 @@ def process_and_execute(incoming_args):
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
                 
-                # Check for forced player from Patcher (if we add that later)
                 if state.get('active_player') == 'unity':
-                    logger.info("PATCHER STATE: Unity Player Forced.")
+                    logger.debug("PATCHER STATE: Unity Player Forced.")
                 
                 if state.get('force_fallback', False) and current_time < state.get('fallback_until', 0):
                     logger.warning("GLOBAL FALLBACK ACTIVE.")
-                    forced_tier = 2
+                    forced_tier = 2 # Force to T2 (Modern) or T3
                 
                 failed_urls = state.get('failed_urls', {})
                 if target_url in failed_urls:
                     failed_info = failed_urls[target_url]
                     last_time = failed_info.get('last_request_time', 0)
                     if current_time - last_time < CONFIG.get("failure_retry_window", 15):
-                        logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Escalating to Proxy.")
-                        forced_tier = 2 # Move to proxy
-        except Exception as e:
-            logger.debug(f"State Check Error: {e}")
+                        logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Escalating.")
+                        forced_tier = 2
+        except Exception: pass
 
-        logger.debug(f"Status: Tier1={t1_enabled}, Tier2={t2_enabled}, Tier3={t3_enabled}, ForcedTier={forced_tier}")
-
+        # --- STEP 2: PARALLEL RESOLUTION ---
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         REMOTE_BASE = f"https://{domain}"
-        GLOBAL_TIMEOUT = 15.0 # Increased timeout for better reliability
+        GLOBAL_TIMEOUT = 8.0 # Faster response to satisfy VRChat player timeouts
+        PATIENCE_WINDOW = 2.0 # Give T1 (Proxy) a brief head start
         custom_ua = CONFIG.get("custom_user_agent")
 
-        # 1. Start Modern (T1) and Proxy (T2) in Parallel
+        # Re-Tiering: T1 = Proxy, T2 = Modern
         if forced_tier < 3:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 t1_future = None
                 t2_future = None
                 
-                if t1_enabled and forced_tier < 1:
-                    t1_future = executor.submit(resolve_tier_1_modern, incoming_args, GLOBAL_TIMEOUT, custom_ua)
+                # Tier 1 (Proxy) - Now preferred for speed
+                if t2_enabled and forced_tier < 1:
+                    t1_future = executor.submit(resolve_tier_2_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
                 
-                if t2_enabled and forced_tier < 3:
-                    t2_future = executor.submit(resolve_tier_2_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
-                
-                # Check T1 (Modern) Result First
-                if t1_future:
-                    t1_res = t1_future.result()
-                    if t1_res:
-                        logger.info("WINNER: Tier 1 (Modern)")
-                        update_wrapper_success()
-                        safe_print(t1_res['url'])
-                        return 0
+                # Tier 2 (Modern yt-dlp)
+                if t1_enabled and forced_tier < 2:
+                    t2_future = executor.submit(resolve_tier_1_modern, incoming_args, 30.0, custom_ua) # Let T2 run longer in background
 
-                # 2. If T1 fails (or is disabled), check T2 (Proxy) result
-                if t2_future:
-                    t2_res = t2_future.result()
-                    if t2_res:
-                        logger.info("WINNER: Tier 2 (Proxy)")
-                        update_wrapper_success()
-                        safe_print(t2_res['url'])
-                        return 0
+                # --- STRATEGY: Proxy-Preferred Race with Verification ---
+                # Check T1 (Proxy) first
+                if t1_future:
+                    try:
+                        t1_res = t1_future.result(timeout=PATIENCE_WINDOW)
+                        if t1_res:
+                            # Verify Proxy Result before committing!
+                            if verify_url(t1_res['url']):
+                                logger.info("WINNER: Tier 1 (Proxy) [Verified]")
+                                update_wrapper_success(target_url, t1_res['url'])
+                                safe_print(t1_res['url'])
+                                # Note: T2 continues in background if it's still running
+                                return 0
+                            else:
+                                logger.warning("Tier 1 (Proxy) produced invalid link. Falling back.")
+                    except Exception:
+                        pass # Proxy slow or failed
+
+                # Wait for FIRST among remaining
+                tasks = {}
+                if t1_future and not t1_future.done(): tasks[t1_future] = 1
+                if t2_future and not t2_future.done(): tasks[t2_future] = 2
                 
-                # 3. If T1 and T2 fail, fallback to T3 (Native)
+                if tasks:
+                    for future in as_completed(tasks, timeout=GLOBAL_TIMEOUT):
+                        res = future.result()
+                        if res:
+                            # Re-verify if it's from proxy
+                            if res['tier'] == 2: # This is the resolve_tier_2_proxy
+                                if not verify_url(res['url']): continue
+                            
+                            logger.info(f"WINNER: Tier {res['tier']} (Racing)")
+                            update_wrapper_success(target_url, res['url'])
+                            safe_print(res['url'])
+                            return 0
+
+                # 3. Fallback to T3 (Native)
                 if t3_enabled:
-                    logger.info("Tiers 1 & 2 failed. Attempting Tier 3 (Native)...")
-                    t3_res = resolve_tier_3_native(incoming_args, GLOBAL_TIMEOUT + 5.0)
+                    logger.info("Tiers 1 & 2 failed or timed out. Attempting Tier 3 (Native)...")
+                    t3_res = resolve_tier_3_native(incoming_args, timeout=GLOBAL_TIMEOUT)
                     if t3_res:
                         logger.info("Tier 3 SUCCESS (Native).")
-                        update_wrapper_success()
+                        update_wrapper_success(target_url, t3_res['url'])
                         safe_print(t3_res['url'])
                         return 0
         else:

@@ -321,7 +321,7 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active
             
             if failed_url:
                 # Store the URL and when it failed. We block it for a while.
-                existing = state['failed_urls'].get(failed_url, {})
+                existing = state.get('failed_urls', {}).get(failed_url, {})
                 current_tier = existing.get('tier', 0)
                 new_tier = min(current_tier + 1, 3)
                 
@@ -330,7 +330,13 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active
                     'tier': new_tier,
                     'last_request_time': existing.get('last_request_time', time.time())
                 }
-                logger.warning(f"URL Failed: {failed_url}. Escalating to Tier {new_tier} for this URL.")
+                
+                # IMPORTANT: Clear cache for this failed URL!
+                if 'cache' in state and failed_url in state['cache']:
+                    logger.debug(f"Clearing cache entry for failing URL: {failed_url[:50]}...")
+                    del state['cache'][failed_url]
+
+                logger.warning(f"URL Failed: {failed_url[:50]}... Escalating to Tier {new_tier + 1} for this URL.")
             else:
                 state['force_fallback'] = True
                 if duration:

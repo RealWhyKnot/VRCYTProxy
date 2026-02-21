@@ -378,29 +378,7 @@ def process_and_execute(incoming_args):
             if final_output: safe_print(final_output)
             return return_code
 
-        # --- STEP 1: CACHE CHECK ---
-        try:
-            if os.path.exists(WRAPPER_STATE_PATH):
-                with open(WRAPPER_STATE_PATH, 'r') as f:
-                    state = json.load(f)
-                
-                cache = state.get('cache', {})
-                if target_url in cache:
-                    entry = cache[target_url]
-                    if current_time < entry.get('expiry', 0):
-                        cached_url = entry.get('url')
-                        logger.info(f"CACHE HIT: {target_url[:50]}...")
-                        # One final verification of the cached URL
-                        if verify_url(cached_url, timeout=2.0):
-                            safe_print(cached_url)
-                            return 0
-                        else:
-                            logger.debug("Cached URL expired or is now invalid.")
-                            del state['cache'][target_url]
-                            with open(WRAPPER_STATE_PATH, 'w') as wf: json.dump(state, wf)
-        except Exception as e:
-            logger.debug(f"Cache Check Error: {e}")
-
+        # --- STEP 1: STATE & TIER CHECK ---
         t1_enabled = CONFIG.get("enable_tier1_modern", True)
         t2_enabled = CONFIG.get("enable_tier2_proxy", True)
         t3_enabled = CONFIG.get("enable_tier3_native", True)
@@ -424,10 +402,35 @@ def process_and_execute(incoming_args):
                     last_time = failed_info.get('last_request_time', 0)
                     if current_time - last_time < CONFIG.get("failure_retry_window", 15):
                         logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Escalating.")
-                        forced_tier = 2
+                        forced_tier = failed_info.get('tier', 1) + 1
         except Exception: pass
 
-        # --- STEP 2: PARALLEL RESOLUTION ---
+        # --- STEP 2: CACHE CHECK (Only if not escalated) ---
+        if forced_tier < 2:
+            try:
+                if os.path.exists(WRAPPER_STATE_PATH):
+                    with open(WRAPPER_STATE_PATH, 'r') as f:
+                        state = json.load(f)
+                    
+                    cache = state.get('cache', {})
+                    if target_url in cache:
+                        entry = cache[target_url]
+                        if current_time < entry.get('expiry', 0):
+                            cached_url = entry.get('url')
+                            logger.info(f"CACHE HIT: {target_url[:50]}...")
+                            # One final verification of the cached URL
+                            if verify_url(cached_url, timeout=2.0):
+                                safe_print(cached_url)
+                                return 0
+                            else:
+                                logger.debug("Cached URL expired or is now invalid.")
+                                if 'cache' in state and target_url in state['cache']:
+                                    del state['cache'][target_url]
+                                    with open(WRAPPER_STATE_PATH, 'w') as wf: json.dump(state, wf)
+            except Exception as e:
+                logger.debug(f"Cache Check Error: {e}")
+
+        # --- STEP 3: PARALLEL RESOLUTION ---
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         REMOTE_BASE = f"https://{domain}"
         GLOBAL_TIMEOUT = 8.0 # Faster response to satisfy VRChat player timeouts

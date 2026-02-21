@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.21.7 .dev" 
+WRAPPER_VERSION = "v2026.02.21.11 .dev" 
 BUILD_TYPE = "DEV" 
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"
@@ -167,73 +167,89 @@ def update_wrapper_success(target_url=None, resolved_url=None):
             state['force_fallback'] = False
             
             if target_url and resolved_url:
-                if 'cache' not in state: state['cache'] = {}
-                # Cache for 15 minutes
-                state['cache'][target_url] = {
-                    'url': resolved_url,
-                    'expiry': time.time() + 900
+                # Single-entry cache: Store only the last resolution
+                state['cache'] = {
+                    target_url: {
+                        'url': resolved_url,
+                        'expiry': time.time() + 900
+                    }
                 }
-                logger.debug(f"Cached resolution for: {target_url[:50]}...")
+                logger.debug(f"Cached last resolution for: {target_url[:50]}...")
 
             with open(WRAPPER_STATE_PATH, 'w') as f:
                 json.dump(state, f)
     except: pass
 
-def verify_stream(url, timeout=3.0):
-    """Deep verification of a stream. If it's a manifest, checks segments."""
-    if not url: return False
+def verify_stream(url, timeout=3.0, depth=0):
+    """Deep verification of a stream. Recursively checks bitrate manifests."""
+    if not url or depth > 2: return False
+    
+    # Use headers that mimic VRChat (MediaFoundation/AVPro)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive"
+    }
+    
     try:
         # 1. Initial HEAD check
-        req = urllib.request.Request(url, method='HEAD')
-        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        req = urllib.request.Request(url, method='HEAD', headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status >= 400: return False
             
-            # If it's a direct video file, we're likely good
             content_type = resp.headers.get('Content-Type', '').lower()
-            if 'video/' in content_type or 'audio/' in content_type or 'application/octet-stream' in content_type:
+            if any(x in content_type for x in ['video/', 'audio/', 'application/octet-stream']):
                 return True
         
-        # 2. Manifest Deep Check (for M3U8/DASH)
+        # 2. Manifest Deep Check
         is_manifest = any(x in url.lower() for x in ['.m3u8', '.mpd', 'manifest'])
         if is_manifest:
-            logger.debug(f"Deep-verifying manifest: {url[:50]}...")
-            req_get = urllib.request.Request(url, method='GET')
-            req_get.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            req_get = urllib.request.Request(url, method='GET', headers=headers)
             with urllib.request.urlopen(req_get, timeout=timeout) as resp:
-                raw_content = resp.read()
-                content = raw_content.decode('utf-8', errors='ignore').strip()
+                content = resp.read().decode('utf-8', errors='ignore').strip()
                 
-                # Validation: Manifest MUST NOT be HTML
                 if content.startswith('<!DOCTYPE') or '<html' in content.lower():
-                    logger.warning("Manifest deep-check received HTML instead of stream data.")
                     return False
                 
-                # Validation: Check for common manifest headers
                 if not any(x in content for x in ['#EXTM3U', 'MPD', 'Playlist']):
-                    logger.debug("Content does not look like a valid manifest.")
                     return False
 
-                # Look for a segment URL
+                # Extract first URI from manifest
                 lines = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
                 if lines:
-                    segment_url = lines[0]
-                    if not segment_url.startswith('http'):
+                    target_uri = lines[0]
+                    if not target_uri.startswith('http'):
                         from urllib.parse import urljoin
-                        segment_url = urljoin(url, segment_url)
+                        target_uri = urljoin(url, target_uri)
                     
-                    # Verify the first segment
-                    seg_req = urllib.request.Request(segment_url, method='HEAD')
-                    seg_req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    # Recursive check if it's another manifest (bitrate list)
+                    if any(x in target_uri.lower() for x in ['.m3u8', '.mpd']):
+                        return verify_stream(target_uri, timeout, depth + 1)
+                    
+                    # Otherwise verify it as a segment
+                    seg_req = urllib.request.Request(target_uri, method='HEAD', headers=headers)
                     with urllib.request.urlopen(seg_req, timeout=timeout) as seg_resp:
                         return seg_resp.status < 400
-                else:
-                    logger.warning("Manifest is empty (no segments).")
-                    return False
         
         return True 
     except Exception as e:
-        logger.debug(f"Stream Verification FAILED: {e}")
+        logger.debug(f"Stream Verification FAILED (Depth {depth}): {e}")
+        return False
+
+def verify_stream_with_ytdlp(ytdlp_path, url, timeout=5.0):
+    """Uses the actual yt-dlp binary to verify if a URL is playable."""
+    if not os.path.exists(ytdlp_path): return False
+    try:
+        # --check-formats is a lightweight way to verify the link works
+        cmd = [ytdlp_path, "--check-formats", "--no-warnings", "--ignore-errors", url]
+        process = subprocess.run(
+            cmd, capture_output=True, timeout=timeout, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        return process.returncode == 0
+    except Exception as e:
+        logger.debug(f"yt-dlp Verification failed for {ytdlp_path}: {e}")
         return False
 
 def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, log_level=logging.INFO, timeout=10.0):
@@ -296,15 +312,13 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
                 data = json.loads(response.read().decode())
                 res = data.get("stream_url") or data.get("url")
                 if res:
-                    logger.debug(f"Proxy resolved: {res[:100]}...")
                     return res
-            logger.debug(f"Proxy API Status: {response.status}")
     except Exception as e: 
         logger.debug(f"Proxy API Error: {e}")
     return None
 
 def resolve_tier_1_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=None, remote_server_base=None):
-    """Tier 1: Remote Proxy (WhyKnot.dev)."""
+    """Tier 1: Remote Proxy (WhyKnot.dev). Verified via Deep Manifest Check."""
     try:
         logger.debug(f"Tier 1 (Proxy) started. Timeout: {res_timeout}s")
         url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base)
@@ -314,14 +328,12 @@ def resolve_tier_1_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=
                 return {"tier": 1, "url": url}
             else:
                 logger.warning("WINNER: Tier 1 (Proxy) FAILED Deep Verification.")
-        else:
-            logger.debug("Tier 1 (Proxy) failed to resolve.")
     except Exception as e: 
         logger.debug(f"Tier 1 (Proxy) Crash: {e}")
     return None
 
 def resolve_tier_2_modern(incoming_args, res_timeout=10.0, custom_ua=None):
-    """Tier 2: Latest yt-dlp with Deno/EJS support."""
+    """Tier 2: Latest yt-dlp. Verified via binary check."""
     try:
         max_height = CONFIG.get("preferred_max_height", 1080)
         is_legacy = detect_legacy(incoming_args, custom_ua)
@@ -340,16 +352,13 @@ def resolve_tier_2_modern(incoming_args, res_timeout=10.0, custom_ua=None):
                 format_specified = True
             tier_2_args.append(arg)
             
-        # Hook in Deno and EJS component
         DENO_PATH = os.path.join(APP_BASE_PATH, "deno.exe")
         tier_2_args.extend(["--remote-components", "ejs:github"])
         if os.path.exists(DENO_PATH):
-            logger.debug(f"Deno found. Enabling EJS in Tier 2.")
             tier_2_args.extend(["--extractor-args", f"ejs:deno_path={DENO_PATH}"])
 
         if not format_specified:
             if is_legacy:
-                logger.info(f"Tier 2: Legacy player detected. Applying compatible format.")
                 tier_2_args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
             else:
                 tier_2_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
@@ -358,16 +367,17 @@ def resolve_tier_2_modern(incoming_args, res_timeout=10.0, custom_ua=None):
         resolved_url, return_code = attempt_executable(LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, tier_2_args, use_custom_temp_dir=True, timeout=res_timeout)
         
         if return_code == 0 and resolved_url:
-            logger.info(f"Tier 2 SUCCESS (Modern): {resolved_url[:100]}...")
-            return {"tier": 2, "url": resolved_url}
-        else:
-            logger.debug(f"Tier 2 (Modern) Failed. Code: {return_code}")
+            if verify_stream_with_ytdlp(LATEST_YTDLP_PATH, resolved_url):
+                logger.info(f"Tier 2 SUCCESS (Modern): {resolved_url[:100]}...")
+                return {"tier": 2, "url": resolved_url}
+            else:
+                logger.warning("Tier 2 (Modern) result failed self-verification.")
     except Exception as e: 
         logger.debug(f"Tier 2 (Modern) Crash: {e}")
     return None
 
 def resolve_tier_3_native(incoming_args, res_timeout=15.0):
-    """Tier 3: Original VRChat yt-dlp."""
+    """Tier 3: Original VRChat yt-dlp. Verified via binary check."""
     try:
         logger.debug(f"Tier 3 (Native) started. Timeout: {res_timeout}s")
         final_output, return_code = attempt_executable(
@@ -375,47 +385,30 @@ def resolve_tier_3_native(incoming_args, res_timeout=15.0):
             timeout=res_timeout
         )
         if return_code == 0 and final_output:
-            logger.info("Tier 3 SUCCESS (Native).")
-            return {"tier": 3, "url": final_output}
-        else:
-            logger.debug(f"Tier 3 (Native) Failed. Code: {return_code}")
+            if verify_stream_with_ytdlp(ORIGINAL_YTDLP_PATH, final_output):
+                logger.info("Tier 3 SUCCESS (Native).")
+                return {"tier": 3, "url": final_output}
+            else:
+                logger.warning("Tier 3 (Native) result failed self-verification.")
     except Exception as e:
         logger.debug(f"Tier 3 (Native) Crash: {e}")
     return None
 
 def process_and_execute(incoming_args):
     try:
-        # --- DEBUG LOGGING ---
         logger.info(f"--- RESOLVER START ({WRAPPER_VERSION}) ---")
         
-        # Verify Critical Dependencies
-        if not os.path.exists(LATEST_YTDLP_PATH):
-            logger.debug(f"Tier 2 executable missing at {LATEST_YTDLP_PATH}")
-        if not os.path.exists(os.path.join(APP_BASE_PATH, "deno.exe")):
-            logger.debug("Deno (Tier 2 dependency) is missing.")
-
-        logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
-        
-        # Log specific arguments of interest for diagnosis
-        for i, arg in enumerate(incoming_args):
-            if arg in ("-f", "--format"):
-                logger.debug(f"Detected Format Argument: {incoming_args[i+1] if i+1 < len(incoming_args) else 'MISSING'}")
-            if arg == "--user-agent":
-                logger.debug(f"Detected User-Agent Argument: {incoming_args[i+1] if i+1 < len(incoming_args) else 'MISSING'}")
-        # ---------------------
-
         current_time = time.time()
         target_url = find_url_in_args(incoming_args)
         
         if not target_url:
-            logger.debug("No URL in args. Running native.")
             final_output, return_code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args)
             if final_output: safe_print(final_output)
             return return_code
 
-        # --- STEP 1: STATE & TIER CHECK ---
-        t1_enabled = CONFIG.get("enable_tier2_proxy", True) # Proxy is T1
-        t2_enabled = CONFIG.get("enable_tier1_modern", True) # Modern is T2
+        # --- STEP 1: STATE, TIER & BLACKLIST CHECK ---
+        t1_enabled = CONFIG.get("enable_tier2_proxy", True) 
+        t2_enabled = CONFIG.get("enable_tier1_modern", True) 
         t3_enabled = CONFIG.get("enable_tier3_native", True)
         forced_tier = 0
         
@@ -424,23 +417,39 @@ def process_and_execute(incoming_args):
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
                 
+                # Domain Blacklist Check with recovery timer
+                from urllib.parse import urlparse
+                target_domain = urlparse(target_url).netloc.lower()
+                blacklist_entry = state.get('domain_blacklist', {}).get(target_domain, {})
+                
+                if blacklist_entry:
+                    if current_time < blacklist_entry.get('expiry', 0):
+                        failed_tiers = blacklist_entry.get('failed_tiers', [])
+                        if 1 in failed_tiers:
+                            logger.warning(f"Tier 1 blacklisted for '{target_domain}'. Recovery in {int(blacklist_entry['expiry'] - current_time)}s.")
+                            t1_enabled = False
+                        if 2 in failed_tiers and 1 in failed_tiers:
+                            logger.error(f"Domain '{target_domain}' unreliable. Locking to Tier 2 safety valve.")
+                            t1_enabled = False
+                            t2_enabled = True 
+                            forced_tier = 2
+                    else:
+                        logger.info(f"Domain '{target_domain}' blacklist expired. Retrying all tiers.")
+
                 if state.get('active_player') == 'unity':
                     logger.debug("PATCHER STATE: Unity Player Forced.")
                 
                 if state.get('force_fallback', False) and current_time < state.get('fallback_until', 0):
-                    logger.warning("GLOBAL FALLBACK ACTIVE.")
-                    forced_tier = 2 # Force to T2 (Modern) or T3
+                    forced_tier = 2 
                 
                 failed_urls = state.get('failed_urls', {})
                 if target_url in failed_urls:
                     failed_info = failed_urls[target_url]
-                    last_time = failed_info.get('last_request_time', 0)
-                    if current_time - last_time < CONFIG.get("failure_retry_window", 15):
-                        logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Escalating.")
+                    if current_time - failed_info.get('last_request_time', 0) < CONFIG.get("failure_retry_window", 15):
                         forced_tier = failed_info.get('tier', 1) + 1
         except Exception: pass
 
-        # --- STEP 2: CACHE CHECK (Only if not escalated) ---
+        # --- STEP 2: CACHE CHECK ---
         if forced_tier < 2:
             try:
                 if os.path.exists(WRAPPER_STATE_PATH):
@@ -453,54 +462,41 @@ def process_and_execute(incoming_args):
                         if current_time < entry.get('expiry', 0):
                             cached_url = entry.get('url')
                             logger.info(f"CACHE HIT: {target_url[:50]}...")
-                            # One final verification of the cached URL
                             if verify_stream(cached_url, timeout=2.0):
                                 safe_print(cached_url)
                                 return 0
                             else:
-                                logger.debug("Cached URL expired or is now invalid.")
                                 if 'cache' in state and target_url in state['cache']:
                                     del state['cache'][target_url]
                                     with open(WRAPPER_STATE_PATH, 'w') as wf: json.dump(state, wf)
-            except Exception as e:
-                logger.debug(f"Cache Check Error: {e}")
+            except Exception: pass
 
         # --- STEP 3: PARALLEL RESOLUTION ---
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         REMOTE_BASE = f"https://{domain}"
-        GLOBAL_TIMEOUT = 8.0 # Faster response to satisfy VRChat player timeouts
-        PATIENCE_WINDOW = 2.0 # Give T1 (Proxy) a brief head start
+        GLOBAL_TIMEOUT = 8.0 
         custom_ua = CONFIG.get("custom_user_agent")
 
-        # T1 = Proxy, T2 = Modern
         if forced_tier < 3:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 t1_future = None
                 t2_future = None
                 
-                # Tier 1 (Proxy) - Preferred for speed
                 if t1_enabled and forced_tier < 1:
                     t1_future = executor.submit(resolve_tier_1_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
                 
-                # Tier 2 (Modern yt-dlp)
                 if t2_enabled and forced_tier < 2:
-                    # T2 can run longer in the background to populate cache
                     t2_future = executor.submit(resolve_tier_2_modern, incoming_args, 30.0, custom_ua)
 
-                # --- STRATEGY: Proxy-Preferred Race with Verification ---
-                # Check T1 (Proxy) first
                 if t1_future:
                     try:
-                        t1_res = t1_future.result(timeout=PATIENCE_WINDOW)
+                        t1_res = t1_future.result()
                         if t1_res:
-                            logger.info("WINNER: Tier 1 (Proxy) [Verified]")
                             update_wrapper_success(target_url, t1_res['url'])
                             safe_print(t1_res['url'])
                             return 0
-                    except Exception: 
-                        pass # Proxy slow or failed
+                    except Exception: pass
 
-                # Wait for FIRST among remaining
                 tasks = {}
                 if t1_future and not t1_future.done(): tasks[t1_future] = 1
                 if t2_future and not t2_future.done(): tasks[t2_future] = 2
@@ -510,24 +506,19 @@ def process_and_execute(incoming_args):
                         for future in as_completed(tasks, timeout=GLOBAL_TIMEOUT):
                             res = future.result()
                             if res:
-                                logger.info(f"WINNER: Tier {res['tier']} (Racing)")
                                 update_wrapper_success(target_url, res['url'])
                                 safe_print(res['url'])
                                 return 0
-                    except Exception: 
-                        pass # Global timeout reached
+                    except Exception: pass
 
-                # 3. Fallback to T3 (Native)
                 if t3_enabled:
-                    logger.info("Tiers 1 & 2 failed or timed out. Attempting Tier 3 (Native)...")
+                    logger.info("Tiers 1 & 2 failed. Attempting Tier 3 (Native)...")
                     t3_res = resolve_tier_3_native(incoming_args, timeout=GLOBAL_TIMEOUT)
                     if t3_res:
-                        logger.info("Tier 3 SUCCESS (Native).")
                         update_wrapper_success(target_url, t3_res['url'])
                         safe_print(t3_res['url'])
                         return 0
         else:
-            # Forced to Native or higher
             if t3_enabled:
                 t3_res = resolve_tier_3_native(incoming_args)
                 if t3_res:
@@ -538,7 +529,7 @@ def process_and_execute(incoming_args):
         return 1
     except Exception as e:
         import traceback
-        logger.error(f"FATAL process_and_execute: {e}\n{traceback.format_exc()}")
+        logger.error(f"FATAL: {e}\n{traceback.format_exc()}")
         return 1
 
 def main():

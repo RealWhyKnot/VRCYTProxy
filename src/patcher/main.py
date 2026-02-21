@@ -300,7 +300,7 @@ WRAPPER_STATE_PATH = None
 
 def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active_player=None, failed_tier=None):
     try:
-        state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown', 'domain_blacklist': {}}
+        state = {'consecutive_errors': 0, 'failed_urls': {}, 'active_player': 'unknown', 'domain_blacklist': {}, 'cache': {}}
         if os.path.exists(WRAPPER_STATE_PATH):
             try:
                 with open(WRAPPER_STATE_PATH, 'r') as f:
@@ -313,39 +313,43 @@ def update_wrapper_state(is_broken=False, duration=None, failed_url=None, active
         if active_player:
             state['active_player'] = active_player
             if active_player == 'unknown':
-                # Reset blacklists on world change for a clean session
+                # Reset all transient session state on world change
                 state['domain_blacklist'] = {}
-                logger.debug("Instance changed: Cleared domain blacklists.")
+                state['cache'] = {}
+                logger.debug("Instance changed: Cleared session blacklists and cache.")
 
         if is_broken:
             count = state.get('consecutive_errors', 0) + 1
             state['consecutive_errors'] = count
             
             if failed_url:
-                # 1. Domain Blacklisting Logic
+                # 1. Handle Domain Blacklisting with 15m recovery
                 try:
                     from urllib.parse import urlparse
                     domain = urlparse(failed_url).netloc.lower()
                     if domain:
                         if domain not in state['domain_blacklist']:
-                            state['domain_blacklist'][domain] = []
-                        if failed_tier and failed_tier not in state['domain_blacklist'][domain]:
-                            state['domain_blacklist'][domain].append(failed_tier)
-                            logger.warning(f"Domain '{domain}' blacklisted for Tier {failed_tier} this session.")
+                            state['domain_blacklist'][domain] = {'failed_tiers': [], 'expiry': 0}
+                        
+                        if failed_tier and failed_tier not in state['domain_blacklist'][domain]['failed_tiers']:
+                            state['domain_blacklist'][domain]['failed_tiers'].append(failed_tier)
+                        
+                        state['domain_blacklist'][domain]['expiry'] = time.time() + 900 # 15 min forgiveness
+                        logger.warning(f"Domain '{domain}' blacklisted for Tier {failed_tier} (Recovery in 15m).")
                 except Exception: pass
 
-                # 2. URL Escalation Logic
+                # 2. Handle URL Escalation
                 existing = state['failed_urls'].get(failed_url, {})
                 current_tier = existing.get('tier', 0)
                 new_tier = min(current_tier + 1, 3)
                 
                 state['failed_urls'][failed_url] = {
-                    'expiry': time.time() + 300, # Block this specific URL for 5 mins
+                    'expiry': time.time() + 300,
                     'tier': new_tier,
                     'last_request_time': existing.get('last_request_time', time.time())
                 }
                 
-                # IMPORTANT: Clear cache for this failed URL!
+                # IMPORTANT: Clear cache if this specific URL failed
                 if 'cache' in state and failed_url in state['cache']:
                     del state['cache'][failed_url]
 
@@ -410,16 +414,29 @@ def check_for_updates():
 def check_wrapper_health(wrapper_file_list):
     try:
         missing_files = []
+        corrupted_files = []
+        
         for filename in wrapper_file_list:
-            if filename.lower() == WRAPPER_EXE_NAME.lower():
-                continue
+            if filename.lower() == WRAPPER_EXE_NAME.lower(): continue
             
             file_path = os.path.join(VRCHAT_TOOLS_DIR, filename)
             if not os.path.exists(file_path):
                 missing_files.append(filename)
+                continue
+            
+            # Functional Check for critical EXEs
+            if filename in ["deno.exe", "yt-dlp-latest.exe"]:
+                try:
+                    subprocess.run([file_path, "--version"], capture_output=True, timeout=3.0, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                except Exception:
+                    corrupted_files.append(filename)
         
-        if missing_files:
-            logger.info(f"Health Check: Restoring missing components: {', '.join(missing_files)}")
+        if missing_files or corrupted_files:
+            reason = []
+            if missing_files: reason.append(f"missing: {', '.join(missing_files)}")
+            if corrupted_files: reason.append(f"non-functional: {', '.join(corrupted_files)}")
+            
+            logger.info(f"Health Check failed ({' and '.join(reason)}). Restoring components...")
             shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
             return True
     except Exception as e:

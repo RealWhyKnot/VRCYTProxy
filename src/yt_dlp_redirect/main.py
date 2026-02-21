@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.20.dev-production-f187016" 
+WRAPPER_VERSION = "v2026.02.20.6 .dev" 
 BUILD_TYPE = "DEV" 
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"
@@ -125,6 +125,16 @@ def find_url_in_args(args):
         if match: return match.group(0)
     return None
 
+def detect_legacy(incoming_args, custom_ua):
+    # Check for User-Agent in incoming args first
+    ua_in_args = None
+    for i, arg in enumerate(incoming_args):
+        if arg == "--user-agent" and i + 1 < len(incoming_args):
+            ua_in_args = incoming_args[i+1]
+            break
+    effective_ua = ua_in_args or custom_ua
+    return any(x in (effective_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"])
+
 def check_proxy_online():
     try:
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
@@ -191,8 +201,8 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
             if arg == "--format" and i + 1 < len(incoming_args):
                 if "bestaudio" in incoming_args[i+1]: video_type = "a"
                 break
-        # Detect legacy players to provide the correct hint to the proxy
-        is_legacy = any(x in (custom_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"])
+        
+        is_legacy = detect_legacy(incoming_args, custom_ua)
         player_hint = "unity" if is_legacy else "avpro"
         
         resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}&player={player_hint}"
@@ -213,11 +223,15 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
         logger.debug(f"Proxy API Error: {e}")
     return None
 
-def resolve_tier_1(incoming_args, res_timeout=10.0, custom_ua=None):
+def resolve_tier_1_modern(incoming_args, res_timeout=10.0, custom_ua=None):
+    """Tier 1: Latest yt-dlp with Deno/EJS support."""
     try:
         max_height = CONFIG.get("preferred_max_height", 1080)
+        is_legacy = detect_legacy(incoming_args, custom_ua)
+        
         tier_1_args = []
         skip_next = False
+        format_specified = False
         for arg in incoming_args:
             if skip_next:
                 skip_next = False
@@ -225,22 +239,27 @@ def resolve_tier_1(incoming_args, res_timeout=10.0, custom_ua=None):
             if arg in ("--exp-allow", "--wild-allow"):
                 skip_next = True
                 continue
+            if arg in ("-f", "--format"):
+                format_specified = True
             tier_1_args.append(arg)
             
+        # Hook in Deno and EJS component
+        DENO_PATH = os.path.join(APP_BASE_PATH, "deno.exe")
         tier_1_args.extend(["--remote-components", "ejs:github"])
+        if os.path.exists(DENO_PATH):
+            logger.debug(f"Deno found at: {DENO_PATH}. Enabling EJS.")
+            tier_1_args.extend(["--extractor-args", f"ejs:deno_path={DENO_PATH}"])
+        else:
+            logger.warning("Deno NOT found. EJS component may fail.")
 
-        # Detect legacy players to force MP4/VOD if necessary
-        is_legacy = any(x in (custom_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"])
-        
-        if "-f" not in tier_1_args and "--format" not in tier_1_args:
+        if not format_specified:
             if is_legacy:
-                logger.info(f"Legacy player detected ({custom_ua}). Forcing MP4/VOD for Tier 1.")
-                # Force combined MP4 (H.264 + AAC) or similar compatible formats
+                logger.info(f"Legacy player detected. Applying MP4 compatibility format.")
                 tier_1_args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
             else:
                 tier_1_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
         
-        logger.debug(f"Tier 1 (Local) started. Timeout: {res_timeout}s")
+        logger.debug(f"Tier 1 (Modern) started. Timeout: {res_timeout}s")
         resolved_url, return_code = attempt_executable(LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, tier_1_args, use_custom_temp_dir=True, timeout=res_timeout)
         
         if return_code == 0 and resolved_url:
@@ -252,7 +271,8 @@ def resolve_tier_1(incoming_args, res_timeout=10.0, custom_ua=None):
         logger.debug(f"Tier 1 Crash: {e}")
     return None
 
-def resolve_tier_2(target_url, incoming_args, res_timeout=10.0, custom_ua=None, remote_server_base=None):
+def resolve_tier_2_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=None, remote_server_base=None):
+    """Tier 2: Remote Proxy (WhyKnot.dev)."""
     try:
         logger.debug(f"Tier 2 (Proxy) started. Timeout: {res_timeout}s")
         url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base)
@@ -265,11 +285,37 @@ def resolve_tier_2(target_url, incoming_args, res_timeout=10.0, custom_ua=None, 
         logger.debug(f"Tier 2 Crash: {e}")
     return None
 
+def resolve_tier_3_native(incoming_args, res_timeout=15.0):
+    """Tier 3: Original VRChat yt-dlp."""
+    try:
+        logger.debug(f"Tier 3 (Native) started. Timeout: {res_timeout}s")
+        final_output, return_code = attempt_executable(
+            ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args, 
+            timeout=res_timeout
+        )
+        if return_code == 0 and final_output:
+            logger.info("Tier 3 SUCCESS.")
+            return {"tier": 3, "url": final_output}
+        else:
+            logger.debug(f"Tier 3 Failed. Code: {return_code}")
+    except Exception as e:
+        logger.debug(f"Tier 3 Crash: {e}")
+    return None
+
 def process_and_execute(incoming_args):
     try:
+        # --- DEBUG LOGGING ---
         logger.info(f"--- PARALLEL WRAPPER START (v{WRAPPER_VERSION}) ---")
-        logger.debug(f"Args: {incoming_args}")
+        logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
         
+        # Log specific arguments of interest for diagnosis
+        for i, arg in enumerate(incoming_args):
+            if arg in ("-f", "--format"):
+                logger.debug(f"Detected Format Argument: {incoming_args[i+1] if i+1 < len(incoming_args) else 'MISSING'}")
+            if arg == "--user-agent":
+                logger.debug(f"Detected User-Agent Argument: {incoming_args[i+1] if i+1 < len(incoming_args) else 'MISSING'}")
+        # ---------------------
+
         current_time = time.time()
         target_url = find_url_in_args(incoming_args)
         
@@ -289,6 +335,11 @@ def process_and_execute(incoming_args):
                 with open(WRAPPER_STATE_PATH, 'r') as f:
                     state = json.load(f)
                 
+                # Check for forced player from Patcher (if we add that later)
+                if state.get('active_player') == 'unity':
+                    logger.info("PATCHER STATE: Unity Player Forced.")
+                    # We can use this to adjust logic
+                
                 if state.get('force_fallback', False) and current_time < state.get('fallback_until', 0):
                     logger.warning("GLOBAL FALLBACK ACTIVE.")
                     forced_tier = 2
@@ -299,47 +350,64 @@ def process_and_execute(incoming_args):
                     last_time = failed_info.get('last_request_time', 0)
                     if current_time - last_time < CONFIG.get("failure_retry_window", 15):
                         logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Skipping to Native.")
-                        forced_tier = 2
+                        forced_tier = 3 # Move to native
         except Exception as e:
             logger.debug(f"State Check Error: {e}")
 
-        logger.debug(f"Status: Tier1={t1_enabled}, Tier2={t2_enabled}, ForcedTier={forced_tier}")
+        logger.debug(f"Status: Tier1={t1_enabled}, Tier2={t2_enabled}, Tier3={t3_enabled}, ForcedTier={forced_tier}")
 
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         REMOTE_BASE = f"https://{domain}"
         GLOBAL_TIMEOUT = 10.0
         custom_ua = CONFIG.get("custom_user_agent")
 
-        if forced_tier < 2:
-            tasks = []
+        # 1. Start Modern (T1) and Proxy (T2) in Parallel
+        # Proxy (T2) is held as last resort but runs early for speed.
+        if forced_tier < 3:
             with ThreadPoolExecutor(max_workers=2) as executor:
-                if t1_enabled:
-                    tasks.append(executor.submit(resolve_tier_1, incoming_args, GLOBAL_TIMEOUT, custom_ua))
+                t1_future = None
+                t2_future = None
+                
+                if t1_enabled and forced_tier < 1:
+                    t1_future = executor.submit(resolve_tier_1_modern, incoming_args, GLOBAL_TIMEOUT, custom_ua)
+                
                 if t2_enabled:
-                    tasks.append(executor.submit(resolve_tier_2, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE))
+                    t2_future = executor.submit(resolve_tier_2_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
                 
-                logger.debug(f"Submitted {len(tasks)} parallel tasks.")
-                
-                for future in as_completed(tasks):
-                    result = future.result()
-                    if result:
-                        logger.info(f"PARALLEL WINNER: Tier {result['tier']}")
+                # Check T1 (Modern) Result First
+                if t1_future:
+                    t1_res = t1_future.result()
+                    if t1_res:
+                        logger.info("PARALLEL WINNER: Tier 1 (Modern)")
                         update_wrapper_success()
-                        safe_print(result['url'])
+                        safe_print(t1_res['url'])
                         return 0
-            logger.debug("All parallel tasks completed with no result.")
 
-        if t3_enabled:
-            logger.info("Running Tier 3 [NATIVE]...")
-            final_output, return_code = attempt_executable(
-                ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args, 
-                timeout=GLOBAL_TIMEOUT + 5.0
-            )
-            if return_code == 0 and final_output:
-                logger.info("Tier 3 SUCCESS.")
-                safe_print(final_output)
-                return 0
-            logger.debug(f"Tier 3 Failed. Code: {return_code}")
+                # 2. If T1 fails (or is disabled), try T3 (Native)
+                if t3_enabled:
+                    logger.info("Tier 1 failed/skipped. Attempting Tier 3 (Native)...")
+                    t3_res = resolve_tier_3_native(incoming_args, GLOBAL_TIMEOUT + 5.0)
+                    if t3_res:
+                        logger.info("Tier 3 SUCCESS (Native).")
+                        update_wrapper_success()
+                        safe_print(t3_res['url'])
+                        return 0
+                
+                # 3. If T1 and T3 fail, fallback to T2 (Proxy) result
+                if t2_future:
+                    t2_res = t2_future.result()
+                    if t2_res:
+                        logger.info("Tiers 1 & 3 failed. Using Tier 2 (Proxy) as last resort.")
+                        update_wrapper_success()
+                        safe_print(t2_res['url'])
+                        return 0
+        else:
+            # Forced to Native or higher
+            if t3_enabled:
+                t3_res = resolve_tier_3_native(incoming_args)
+                if t3_res:
+                    safe_print(t3_res['url'])
+                    return 0
 
         logger.error(f"ALL TIERS FAILED for: {target_url}")
         return 1

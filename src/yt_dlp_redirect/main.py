@@ -305,7 +305,7 @@ def resolve_tier_3_native(incoming_args, res_timeout=15.0):
 def process_and_execute(incoming_args):
     try:
         # --- DEBUG LOGGING ---
-        logger.info(f"--- PARALLEL WRAPPER START (v{WRAPPER_VERSION}) ---")
+        logger.info(f"--- PARALLEL WRAPPER START ({WRAPPER_VERSION}) ---")
         logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
         
         # Log specific arguments of interest for diagnosis
@@ -338,7 +338,6 @@ def process_and_execute(incoming_args):
                 # Check for forced player from Patcher (if we add that later)
                 if state.get('active_player') == 'unity':
                     logger.info("PATCHER STATE: Unity Player Forced.")
-                    # We can use this to adjust logic
                 
                 if state.get('force_fallback', False) and current_time < state.get('fallback_until', 0):
                     logger.warning("GLOBAL FALLBACK ACTIVE.")
@@ -349,8 +348,8 @@ def process_and_execute(incoming_args):
                     failed_info = failed_urls[target_url]
                     last_time = failed_info.get('last_request_time', 0)
                     if current_time - last_time < CONFIG.get("failure_retry_window", 15):
-                        logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Skipping to Native.")
-                        forced_tier = 3 # Move to native
+                        logger.info(f"RAPID RETRY DETECTED ({current_time - last_time:.1f}s). Escalating to Proxy.")
+                        forced_tier = 2 # Move to proxy
         except Exception as e:
             logger.debug(f"State Check Error: {e}")
 
@@ -358,11 +357,10 @@ def process_and_execute(incoming_args):
 
         domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
         REMOTE_BASE = f"https://{domain}"
-        GLOBAL_TIMEOUT = 10.0
+        GLOBAL_TIMEOUT = 15.0 # Increased timeout for better reliability
         custom_ua = CONFIG.get("custom_user_agent")
 
         # 1. Start Modern (T1) and Proxy (T2) in Parallel
-        # Proxy (T2) is held as last resort but runs early for speed.
         if forced_tier < 3:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 t1_future = None
@@ -371,35 +369,35 @@ def process_and_execute(incoming_args):
                 if t1_enabled and forced_tier < 1:
                     t1_future = executor.submit(resolve_tier_1_modern, incoming_args, GLOBAL_TIMEOUT, custom_ua)
                 
-                if t2_enabled:
+                if t2_enabled and forced_tier < 3:
                     t2_future = executor.submit(resolve_tier_2_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
                 
                 # Check T1 (Modern) Result First
                 if t1_future:
                     t1_res = t1_future.result()
                     if t1_res:
-                        logger.info("PARALLEL WINNER: Tier 1 (Modern)")
+                        logger.info("WINNER: Tier 1 (Modern)")
                         update_wrapper_success()
                         safe_print(t1_res['url'])
                         return 0
 
-                # 2. If T1 fails (or is disabled), try T3 (Native)
+                # 2. If T1 fails (or is disabled), check T2 (Proxy) result
+                if t2_future:
+                    t2_res = t2_future.result()
+                    if t2_res:
+                        logger.info("WINNER: Tier 2 (Proxy)")
+                        update_wrapper_success()
+                        safe_print(t2_res['url'])
+                        return 0
+                
+                # 3. If T1 and T2 fail, fallback to T3 (Native)
                 if t3_enabled:
-                    logger.info("Tier 1 failed/skipped. Attempting Tier 3 (Native)...")
+                    logger.info("Tiers 1 & 2 failed. Attempting Tier 3 (Native)...")
                     t3_res = resolve_tier_3_native(incoming_args, GLOBAL_TIMEOUT + 5.0)
                     if t3_res:
                         logger.info("Tier 3 SUCCESS (Native).")
                         update_wrapper_success()
                         safe_print(t3_res['url'])
-                        return 0
-                
-                # 3. If T1 and T3 fail, fallback to T2 (Proxy) result
-                if t2_future:
-                    t2_res = t2_future.result()
-                    if t2_res:
-                        logger.info("Tiers 1 & 3 failed. Using Tier 2 (Proxy) as last resort.")
-                        update_wrapper_success()
-                        safe_print(t2_res['url'])
                         return 0
         else:
             # Forced to Native or higher

@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Constants ---
 WRAPPER_NAME = "yt-dlp-wrapper"
-WRAPPER_VERSION = "v2026.02.20.6 .dev" 
+WRAPPER_VERSION = "v2026.02.21.7 .dev" 
 BUILD_TYPE = "DEV" 
 LOG_FILE_NAME = "wrapper.log"
 CONFIG_FILE_NAME = "patcher_config.json"
@@ -157,16 +157,6 @@ def detect_legacy(incoming_args, custom_ua):
             
     return False
 
-def check_proxy_online():
-    try:
-        domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
-        req = urllib.request.Request(f"https://{domain}/api/status/ping", method='GET')
-        with urllib.request.urlopen(req, timeout=3.0) as response:
-            return response.status == 200
-    except Exception as e:
-        logger.debug(f"Proxy Online Check FAILED: {e}")
-        return False
-
 def update_wrapper_success(target_url=None, resolved_url=None):
     try:
         if os.path.exists(WRAPPER_STATE_PATH):
@@ -189,17 +179,50 @@ def update_wrapper_success(target_url=None, resolved_url=None):
                 json.dump(state, f)
     except: pass
 
-def verify_url(url, timeout=3.0):
-    """Checks if a URL is actually reachable via HEAD request."""
+def verify_stream(url, timeout=3.0):
+    """Deep verification of a stream. If it's a manifest, checks segments."""
     if not url: return False
     try:
+        # 1. Initial HEAD check
         req = urllib.request.Request(url, method='HEAD')
-        # Add a common User-Agent to avoid being blocked by simple checks
-        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0")
+        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status < 400
+            if resp.status >= 400: return False
+            
+            # If it's a direct video file, we're likely good
+            content_type = resp.headers.get('Content-Type', '').lower()
+            if 'video/' in content_type or 'audio/' in content_type:
+                return True
+        
+        # 2. Manifest Deep Check (for M3U8/DASH)
+        if '.m3u8' in url.lower() or '.mpd' in url.lower() or 'manifest' in url.lower():
+            logger.debug(f"Deep-verifying manifest: {url[:50]}...")
+            req_get = urllib.request.Request(url, method='GET')
+            req_get.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            with urllib.request.urlopen(req_get, timeout=timeout) as resp:
+                content = resp.read().decode('utf-8', errors='ignore')
+                
+                # Look for a segment URL (usually ends in .ts, .m4s, or is a relative path)
+                lines = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
+                if lines:
+                    segment_url = lines[0]
+                    # Handle relative URLs
+                    if not segment_url.startswith('http'):
+                        from urllib.parse import urljoin
+                        segment_url = urljoin(url, segment_url)
+                    
+                    # Verify the first segment is reachable
+                    seg_req = urllib.request.Request(segment_url, method='HEAD')
+                    seg_req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    with urllib.request.urlopen(seg_req, timeout=timeout) as seg_resp:
+                        return seg_resp.status < 400
+                else:
+                    logger.warning("Manifest appears to be empty or invalid.")
+                    return False
+        
+        return True # Default success if we can't deep-check further
     except Exception as e:
-        logger.debug(f"URL Verification FAILED for {url[:50]}... : {e}")
+        logger.debug(f"Stream Verification FAILED: {e}")
         return False
 
 def attempt_executable(path, executable_name, args, use_custom_temp_dir=False, log_level=logging.INFO, timeout=10.0):
@@ -269,13 +292,30 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
         logger.debug(f"Proxy API Error: {e}")
     return None
 
-def resolve_tier_1_modern(incoming_args, res_timeout=10.0, custom_ua=None):
-    """Tier 1: Latest yt-dlp with Deno/EJS support."""
+def resolve_tier_1_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=None, remote_server_base=None):
+    """Tier 1: Remote Proxy (WhyKnot.dev)."""
+    try:
+        logger.debug(f"Tier 1 (Proxy) started. Timeout: {res_timeout}s")
+        url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base)
+        if url:
+            if verify_stream(url):
+                logger.info(f"Tier 1 SUCCESS (Proxy): {url[:100]}...")
+                return {"tier": 1, "url": url}
+            else:
+                logger.warning("Tier 1 (Proxy) failed deep verification.")
+        else:
+            logger.debug("Tier 1 (Proxy) failed to resolve.")
+    except Exception as e: 
+        logger.debug(f"Tier 1 (Proxy) Crash: {e}")
+    return None
+
+def resolve_tier_2_modern(incoming_args, res_timeout=10.0, custom_ua=None):
+    """Tier 2: Latest yt-dlp with Deno/EJS support."""
     try:
         max_height = CONFIG.get("preferred_max_height", 1080)
         is_legacy = detect_legacy(incoming_args, custom_ua)
         
-        tier_1_args = []
+        tier_2_args = []
         skip_next = False
         format_specified = False
         for arg in incoming_args:
@@ -287,48 +327,32 @@ def resolve_tier_1_modern(incoming_args, res_timeout=10.0, custom_ua=None):
                 continue
             if arg in ("-f", "--format"):
                 format_specified = True
-            tier_1_args.append(arg)
+            tier_2_args.append(arg)
             
         # Hook in Deno and EJS component
         DENO_PATH = os.path.join(APP_BASE_PATH, "deno.exe")
-        tier_1_args.extend(["--remote-components", "ejs:github"])
+        tier_2_args.extend(["--remote-components", "ejs:github"])
         if os.path.exists(DENO_PATH):
-            logger.debug(f"Deno found at: {DENO_PATH}. Enabling EJS.")
-            tier_1_args.extend(["--extractor-args", f"ejs:deno_path={DENO_PATH}"])
-        else:
-            logger.warning("Deno NOT found. EJS component may fail.")
+            logger.debug(f"Deno found. Enabling EJS in Tier 2.")
+            tier_2_args.extend(["--extractor-args", f"ejs:deno_path={DENO_PATH}"])
 
         if not format_specified:
             if is_legacy:
-                logger.info(f"Legacy player detected. Applying MP4 compatibility format.")
-                tier_1_args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
+                logger.info(f"Tier 2: Legacy player detected. Applying compatible format.")
+                tier_2_args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
             else:
-                tier_1_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
+                tier_2_args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
         
-        logger.debug(f"Tier 1 (Modern) started. Timeout: {res_timeout}s")
-        resolved_url, return_code = attempt_executable(LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, tier_1_args, use_custom_temp_dir=True, timeout=res_timeout)
+        logger.debug(f"Tier 2 (Modern) started. Timeout: {res_timeout}s")
+        resolved_url, return_code = attempt_executable(LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, tier_2_args, use_custom_temp_dir=True, timeout=res_timeout)
         
         if return_code == 0 and resolved_url:
-            logger.info(f"Tier 1 Success: {resolved_url[:100]}...")
-            return {"tier": 1, "url": resolved_url}
+            logger.info(f"Tier 2 SUCCESS (Modern): {resolved_url[:100]}...")
+            return {"tier": 2, "url": resolved_url}
         else:
-            logger.debug(f"Tier 1 Failed. Code: {return_code}")
+            logger.debug(f"Tier 2 (Modern) Failed. Code: {return_code}")
     except Exception as e: 
-        logger.debug(f"Tier 1 Crash: {e}")
-    return None
-
-def resolve_tier_2_proxy(target_url, incoming_args, res_timeout=10.0, custom_ua=None, remote_server_base=None):
-    """Tier 2: Remote Proxy (WhyKnot.dev)."""
-    try:
-        logger.debug(f"Tier 2 (Proxy) started. Timeout: {res_timeout}s")
-        url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base)
-        if url:
-            logger.info(f"Tier 2 Success: {url[:100]}...")
-            return {"tier": 2, "url": url}
-        else:
-            logger.debug("Tier 2 Failed.")
-    except Exception as e: 
-        logger.debug(f"Tier 2 Crash: {e}")
+        logger.debug(f"Tier 2 (Modern) Crash: {e}")
     return None
 
 def resolve_tier_3_native(incoming_args, res_timeout=15.0):
@@ -340,12 +364,12 @@ def resolve_tier_3_native(incoming_args, res_timeout=15.0):
             timeout=res_timeout
         )
         if return_code == 0 and final_output:
-            logger.info("Tier 3 SUCCESS.")
+            logger.info("Tier 3 SUCCESS (Native).")
             return {"tier": 3, "url": final_output}
         else:
-            logger.debug(f"Tier 3 Failed. Code: {return_code}")
+            logger.debug(f"Tier 3 (Native) Failed. Code: {return_code}")
     except Exception as e:
-        logger.debug(f"Tier 3 Crash: {e}")
+        logger.debug(f"Tier 3 (Native) Crash: {e}")
     return None
 
 def process_and_execute(incoming_args):
@@ -355,9 +379,9 @@ def process_and_execute(incoming_args):
         
         # Verify Critical Dependencies
         if not os.path.exists(LATEST_YTDLP_PATH):
-            logger.debug(f"Tier 1 executable missing at {LATEST_YTDLP_PATH}")
+            logger.debug(f"Tier 2 executable missing at {LATEST_YTDLP_PATH}")
         if not os.path.exists(os.path.join(APP_BASE_PATH, "deno.exe")):
-            logger.debug("Tier 1 EJS dependency (deno.exe) is missing.")
+            logger.debug("Deno (Tier 2 dependency) is missing.")
 
         logger.debug(f"FULL ARGUMENT LIST: {incoming_args}")
         
@@ -379,8 +403,8 @@ def process_and_execute(incoming_args):
             return return_code
 
         # --- STEP 1: STATE & TIER CHECK ---
-        t1_enabled = CONFIG.get("enable_tier1_modern", True)
-        t2_enabled = CONFIG.get("enable_tier2_proxy", True)
+        t1_enabled = CONFIG.get("enable_tier2_proxy", True) # Proxy is T1
+        t2_enabled = CONFIG.get("enable_tier1_modern", True) # Modern is T2
         t3_enabled = CONFIG.get("enable_tier3_native", True)
         forced_tier = 0
         
@@ -419,7 +443,7 @@ def process_and_execute(incoming_args):
                             cached_url = entry.get('url')
                             logger.info(f"CACHE HIT: {target_url[:50]}...")
                             # One final verification of the cached URL
-                            if verify_url(cached_url, timeout=2.0):
+                            if verify_stream(cached_url, timeout=2.0):
                                 safe_print(cached_url)
                                 return 0
                             else:
@@ -437,19 +461,20 @@ def process_and_execute(incoming_args):
         PATIENCE_WINDOW = 2.0 # Give T1 (Proxy) a brief head start
         custom_ua = CONFIG.get("custom_user_agent")
 
-        # Re-Tiering: T1 = Proxy, T2 = Modern
+        # T1 = Proxy, T2 = Modern
         if forced_tier < 3:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 t1_future = None
                 t2_future = None
                 
-                # Tier 1 (Proxy) - Now preferred for speed
-                if t2_enabled and forced_tier < 1:
-                    t1_future = executor.submit(resolve_tier_2_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
+                # Tier 1 (Proxy) - Preferred for speed
+                if t1_enabled and forced_tier < 1:
+                    t1_future = executor.submit(resolve_tier_1_proxy, target_url, incoming_args, GLOBAL_TIMEOUT, custom_ua, REMOTE_BASE)
                 
                 # Tier 2 (Modern yt-dlp)
-                if t1_enabled and forced_tier < 2:
-                    t2_future = executor.submit(resolve_tier_1_modern, incoming_args, 30.0, custom_ua) # Let T2 run longer in background
+                if t2_enabled and forced_tier < 2:
+                    # T2 can run longer in the background to populate cache
+                    t2_future = executor.submit(resolve_tier_2_modern, incoming_args, 30.0, custom_ua)
 
                 # --- STRATEGY: Proxy-Preferred Race with Verification ---
                 # Check T1 (Proxy) first
@@ -457,16 +482,11 @@ def process_and_execute(incoming_args):
                     try:
                         t1_res = t1_future.result(timeout=PATIENCE_WINDOW)
                         if t1_res:
-                            # Verify Proxy Result before committing!
-                            if verify_url(t1_res['url']):
-                                logger.info("WINNER: Tier 1 (Proxy) [Verified]")
-                                update_wrapper_success(target_url, t1_res['url'])
-                                safe_print(t1_res['url'])
-                                # Note: T2 continues in background if it's still running
-                                return 0
-                            else:
-                                logger.warning("Tier 1 (Proxy) produced invalid link. Falling back.")
-                    except Exception:
+                            logger.info("WINNER: Tier 1 (Proxy) [Verified]")
+                            update_wrapper_success(target_url, t1_res['url'])
+                            safe_print(t1_res['url'])
+                            return 0
+                    except Exception: 
                         pass # Proxy slow or failed
 
                 # Wait for FIRST among remaining
@@ -475,17 +495,16 @@ def process_and_execute(incoming_args):
                 if t2_future and not t2_future.done(): tasks[t2_future] = 2
                 
                 if tasks:
-                    for future in as_completed(tasks, timeout=GLOBAL_TIMEOUT):
-                        res = future.result()
-                        if res:
-                            # Re-verify if it's from proxy
-                            if res['tier'] == 2: # This is the resolve_tier_2_proxy
-                                if not verify_url(res['url']): continue
-                            
-                            logger.info(f"WINNER: Tier {res['tier']} (Racing)")
-                            update_wrapper_success(target_url, res['url'])
-                            safe_print(res['url'])
-                            return 0
+                    try:
+                        for future in as_completed(tasks, timeout=GLOBAL_TIMEOUT):
+                            res = future.result()
+                            if res:
+                                logger.info(f"WINNER: Tier {res['tier']} (Racing)")
+                                update_wrapper_success(target_url, res['url'])
+                                safe_print(res['url'])
+                                return 0
+                    except Exception: 
+                        pass # Global timeout reached
 
                 # 3. Fallback to T3 (Native)
                 if t3_enabled:

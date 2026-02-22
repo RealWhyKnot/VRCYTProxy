@@ -188,7 +188,7 @@ def get_cached_result(target_url):
 
 def process_and_execute(incoming_args):
     try:
-        logger.info(f"--- RESOLVER START (v{WRAPPER_VERSION}) ---")
+        logger.info(f"--- RESOLVER START ({WRAPPER_VERSION}) ---")
         target_url = find_url_in_args(incoming_args)
         
         if not target_url:

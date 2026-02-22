@@ -63,6 +63,7 @@ $BuildDir = Join-Path $PSScriptRoot "build"
 $DistDir = Join-Path $PSScriptRoot "dist"
 $VenvDir = Join-Path $PSScriptRoot ".venv"
 $SrcPatcherDir = Join-Path $PSScriptRoot "src\patcher"
+$SrcWrapperDir = Join-Path $PSScriptRoot "src\yt_dlp_redirect"
 $ResourcesDir = Join-Path $PSScriptRoot "src\resources"
 
 $RedirectorBuildDir = Join-Path $BuildDir "redirector_build"
@@ -202,14 +203,19 @@ try {
     if ($LASTEXITCODE -ne 0) { Write-Host " FAILED" -ForegroundColor Red; exit 1 }
     Write-Host " PASSED" -ForegroundColor Gray
 
-    # Automatically update the hardcoded fallback version in patcher main.py
+    # Automatically update the hardcoded fallback version in both entry points
     if ($Version -and $Version -match "^v") {
-        $VersionFile = Join-Path $SrcPatcherDir "_version.py"
-        
-        Write-Host "   -> Generating version file: $Version ($BuildType)"
         $VersionContent = "__version__ = '$Version'`n__build_type__ = '$BuildType'"
-        [System.IO.File]::WriteAllText($VersionFile, $VersionContent)
-        Write-Host "      File created at: $VersionFile"
+        
+        Write-Host "   -> Generating version files: $Version ($BuildType)"
+        
+        $PatcherVerFile = Join-Path $SrcPatcherDir "_version.py"
+        [System.IO.File]::WriteAllText($PatcherVerFile, $VersionContent)
+        
+        $WrapperVerFile = Join-Path $SrcWrapperDir "_version.py"
+        [System.IO.File]::WriteAllText($WrapperVerFile, $VersionContent)
+        
+        Write-Host "      Version files updated."
     }
 
     Write-Host "[2/6] Installing/Updating dependencies in Conda..." -ForegroundColor Green

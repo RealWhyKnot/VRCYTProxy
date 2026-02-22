@@ -243,12 +243,16 @@ def tail_log_file(log_path, stop_event, monitor):
                         for line in lines:
                             line = line.strip()
                             if not line: continue
-                            msg = f"[Redirector] {line}"
-                            # Parse level from [LEVEL] in line (e.g. 2026... [INFO] [wrapper] ...)
-                            if "[ERROR]" in line: logger.error(msg)
-                            elif "[WARNING]" in line: logger.warning(msg)
-                            elif "[DEBUG]" in line: logger.debug(msg)
-                            else: logger.info(msg)
+                            
+                            # Log Format: 2026-02-21 18:12:49,522 [INFO] [yt-dlp-wrapper] --- MSG ---
+                            # Regex to strip the timestamp, level and name to keep it clean
+                            clean_msg = re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[[^\]]+\] \[[^\]]+\] ', '', line)
+                            full_msg = f"[Redirector] {clean_msg}"
+
+                            if "[ERROR]" in line: logger.error(full_msg)
+                            elif "[WARNING]" in line: logger.warning(full_msg)
+                            elif "[DEBUG]" in line: logger.debug(full_msg)
+                            else: logger.info(full_msg)
 
                             if "WINNER: Tier" in line:
                                 m = re.search(r'Tier (\d+)', line)

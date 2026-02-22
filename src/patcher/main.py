@@ -372,10 +372,19 @@ def disable_patch(file_list):
                 try: os.remove(ORIGINAL_YTDLP_BACKUP_PATH)
                 except: pass
             
-            # 4. Clean up transient state
-            if os.path.exists(WRAPPER_STATE_PATH):
-                try: os.remove(WRAPPER_STATE_PATH)
-                except: pass
+            # 4. Clean up logs and transient state
+            cleanup_targets = [WRAPPER_STATE_PATH, REDIRECTOR_LOG_PATH]
+            for target in cleanup_targets:
+                if target and os.path.exists(target):
+                    try: os.remove(target)
+                    except: pass
+            
+            # 5. Remove any leftover _tmp directories from bundled tools
+            try:
+                for tmp_dir in glob.glob(os.path.join(VRCHAT_TOOLS_DIR, "_tmp*")):
+                    if os.path.isdir(tmp_dir):
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+            except: pass
 
             logger.info("Patch DISABLED (Original state restored).")
             return True

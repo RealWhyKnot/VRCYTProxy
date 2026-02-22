@@ -76,7 +76,8 @@ def setup_logging(debug_mode):
     
     level = logging.DEBUG if debug_mode else logging.INFO
     
-    # We want a clean format for the log file
+    # Use 'a' (append) because redirector is called many times per session.
+    # The Patcher wipes this file once at startup.
     logging.basicConfig(
         level=level,
         format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',

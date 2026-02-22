@@ -87,18 +87,20 @@ class Colors:
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
         color = Colors.RESET
-        # Priority 1: Levels (Errors/Warnings)
+        msg = record.getMessage()
+        
+        # Priority 1: Semantic highlights (ENABLED/DISABLED)
+        if "ENABLED" in msg or "enabled" in msg: color = Colors.GREEN
+        elif "DISABLED" in msg or "disabled" in msg: color = Colors.GREY
+        
+        # Priority 2: Levels (Errors/Warnings) - These OVERRIDE semantic highlights if critical
         if record.levelno >= logging.ERROR: color = Colors.RED
         elif record.levelno >= logging.WARNING: color = Colors.YELLOW
-        else:
-            # Priority 2: Semantic highlights for INFO/DEBUG
-            msg = str(record.msg)
-            if "ENABLED" in msg or "enabled" in msg: color = Colors.GREEN
-            elif "DISABLED" in msg or "disabled" in msg: color = Colors.GREY
-            elif "[Redirector]" in msg: color = Colors.CYAN
+        elif color == Colors.RESET and "[Redirector]" in msg:
+            color = Colors.CYAN
             
         ts = self.formatTime(record, self.datefmt)
-        return f"{Colors.GREY}{ts}{Colors.RESET} - {color}{record.getMessage()}{Colors.RESET}"
+        return f"{Colors.GREY}{ts}{Colors.RESET} - {color}{msg}{Colors.RESET}"
 
 def get_application_path():
     if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)
@@ -238,8 +240,9 @@ def tail_log_file(log_path, stop_event, monitor):
                         lines = f.readlines()
                         for line in lines:
                             line = line.strip()
+                            if not line: continue
                             msg = f"[Redirector] {line}"
-                            # Parse level from [LEVEL] in line
+                            # Parse level from [LEVEL] in line (e.g. 2026... [INFO] [wrapper] ...)
                             if "[ERROR]" in line: logger.error(msg)
                             elif "[WARNING]" in line: logger.warning(msg)
                             elif "[DEBUG]" in line: logger.debug(msg)

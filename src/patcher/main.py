@@ -86,21 +86,23 @@ class Colors:
 
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
-        color = Colors.RESET
+        level_color = Colors.RESET
         msg = record.getMessage()
         
-        # Priority 1: Semantic highlights (ENABLED/DISABLED)
-        if "ENABLED" in msg or "enabled" in msg: color = Colors.GREEN
-        elif "DISABLED" in msg or "disabled" in msg: color = Colors.GREY
+        # 1. Determine level-based color
+        if record.levelno >= logging.ERROR: level_color = Colors.RED
+        elif record.levelno >= logging.WARNING: level_color = Colors.YELLOW
+        elif "ENABLED" in msg or "enabled" in msg: level_color = Colors.GREEN
+        elif "DISABLED" in msg or "disabled" in msg: level_color = Colors.GREY
         
-        # Priority 2: Levels (Errors/Warnings) - These OVERRIDE semantic highlights if critical
-        if record.levelno >= logging.ERROR: color = Colors.RED
-        elif record.levelno >= logging.WARNING: color = Colors.YELLOW
-        elif color == Colors.RESET and "[Redirector]" in msg:
-            color = Colors.CYAN
+        # 2. Handle [Redirector] tag specifically
+        prefix = ""
+        if "[Redirector]" in msg:
+            prefix = f"{Colors.CYAN}[Redirector]{Colors.RESET} "
+            msg = msg.replace("[Redirector] ", "").replace("[Redirector]", "")
             
         ts = self.formatTime(record, self.datefmt)
-        return f"{Colors.GREY}{ts}{Colors.RESET} - {color}{msg}{Colors.RESET}"
+        return f"{Colors.GREY}{ts}{Colors.RESET} - {prefix}{level_color}{msg}{Colors.RESET}"
 
 def get_application_path():
     if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)

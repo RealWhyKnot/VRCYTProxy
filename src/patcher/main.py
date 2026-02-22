@@ -134,6 +134,7 @@ def setup_logging():
     ch = logging.StreamHandler(sys.stdout); ch.setFormatter(ColoredFormatter('%(asctime)s - %(message)s'))
     logger.addHandler(ch)
     try:
+        # Use 'w' (write) to wipe log each run
         fh = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(fh)
@@ -396,6 +397,22 @@ def disable_patch(file_list):
 
 def main():
     global CONFIG, VRCHAT_LOG_DIR, VRCHAT_TOOLS_DIR, TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH, REDIRECTOR_LOG_PATH, WRAPPER_STATE_PATH
+    
+    # --- SINGLETON CHECK ---
+    if platform.system() == 'Windows':
+        # Create a named mutex to ensure only one instance runs
+        mutex_name = "Global\\WKYoutubeProxy_Patcher_Mutex"
+        kernel32 = ctypes.windll.kernel32
+        mutex = kernel32.CreateMutexW(None, False, mutex_name)
+        last_error = kernel32.GetLastError()
+        
+        if last_error == 183: # ERROR_ALREADY_EXISTS
+            print("\n[CRITICAL] Another instance of WKYoutubeProxy is already running.")
+            print("Please close the existing instance before starting a new one.\n")
+            time.sleep(3)
+            sys.exit(1)
+        # We don't need to close the mutex handle here; it will stay alive as long as the process is alive.
+
     CONFIG = load_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME))
     VRCHAT_LOG_DIR = get_vrchat_log_dir()
     VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
@@ -406,6 +423,12 @@ def main():
 
     # --- SESSION START: Clear transient state ---
     logger.info("Initializing fresh session state...")
+    
+    # Wipe Redirector log for a fresh start
+    if os.path.exists(REDIRECTOR_LOG_PATH):
+        try: os.remove(REDIRECTOR_LOG_PATH)
+        except: pass
+
     update_wrapper_state(WRAPPER_STATE_PATH, active_player='unknown')
 
     with open(WRAPPER_FILE_LIST_PATH, 'r') as f: file_list = json.load(f)

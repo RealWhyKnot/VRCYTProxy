@@ -158,9 +158,9 @@ def update_wrapper_success(target_url, resolved_url, tier):
             # Keep only last 3
             state['history'] = state['history'][:3]
             
-            # Clear fallbacks as we are now fully validation-driven
-            state['consecutive_errors'] = 0
-            state['force_fallback'] = False
+            # Clean up legacy fields if they exist
+            for key in ['consecutive_errors', 'force_fallback', 'failed_urls', 'domain_blacklist', 'cache']:
+                if key in state: del state[key]
             
             with open(WRAPPER_STATE_PATH, 'w') as f: json.dump(state, f)
             logger.debug(f"History updated with Tier {tier} result.")
@@ -171,6 +171,16 @@ def get_cached_result(target_url):
     try:
         if os.path.exists(WRAPPER_STATE_PATH):
             with open(WRAPPER_STATE_PATH, 'r') as f: state = json.load(f)
+            
+            # Maintenance: Clean up legacy fields if they exist
+            dirty = False
+            for key in ['consecutive_errors', 'force_fallback', 'failed_urls', 'domain_blacklist', 'cache']:
+                if key in state: 
+                    del state[key]
+                    dirty = True
+            if dirty:
+                with open(WRAPPER_STATE_PATH, 'w') as f: json.dump(state, f)
+
             history = state.get('history', [])
             for target, resolved, tier, ts in history:
                 if target == target_url and (time.time() - ts < 900): # 15m cache

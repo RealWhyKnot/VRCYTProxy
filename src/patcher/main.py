@@ -197,13 +197,6 @@ class LogMonitor:
                                 self.last_attempted_url = m.group(1) if m else None
                                 if not self.is_initial_scan: update_wrapper_state(WRAPPER_STATE_PATH, active_player='unity')
                             
-                            # Error Detection with Debounce (3s)
-                            if any(x in line for x in self.error_patterns) and not self.is_initial_scan:
-                                if self.last_attempted_url and (now - self.last_error_time > 3.0):
-                                    self.last_error_time = now
-                                    orig = self.resolved_to_source.get(self.last_attempted_url, self.last_attempted_url)
-                                    update_wrapper_state(WRAPPER_STATE_PATH, is_broken=True, failed_url=orig, failed_tier=self.last_winner_tier)
-                            
                             # Instance Detection
                             if '[Behaviour] Destination set:' in line or '[Behaviour] Joining wrld_' in line:
                                 it = 'public'
@@ -414,16 +407,6 @@ def main():
     # --- SESSION START: Clear transient state ---
     logger.info("Initializing fresh session state...")
     update_wrapper_state(WRAPPER_STATE_PATH, active_player='unknown')
-    try:
-        if os.path.exists(WRAPPER_STATE_PATH):
-            with open(WRAPPER_STATE_PATH, 'r') as f: state = json.load(f)
-            state['domain_blacklist'] = {}
-            state['failed_urls'] = {}
-            state['cache'] = {}
-            state['consecutive_errors'] = 0
-            state['force_fallback'] = False
-            with open(WRAPPER_STATE_PATH, 'w') as f: json.dump(state, f)
-    except Exception: pass
 
     with open(WRAPPER_FILE_LIST_PATH, 'r') as f: file_list = json.load(f)
     stop_event = threading.Event(); monitor = LogMonitor()

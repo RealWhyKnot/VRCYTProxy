@@ -207,7 +207,8 @@ try {
         $VersionFile = Join-Path $SrcPatcherDir "_version.py"
         
         Write-Host "   -> Generating version file: $Version ($BuildType)"
-        "__version__ = '$Version'`n__build_type__ = '$BuildType'" | Out-File -FilePath $VersionFile -Encoding UTF8
+        $VersionContent = "__version__ = '$Version'`n__build_type__ = '$BuildType'"
+        [System.IO.File]::WriteAllText($VersionFile, $VersionContent)
         Write-Host "      File created at: $VersionFile"
     }
 

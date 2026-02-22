@@ -58,26 +58,31 @@ DEFAULT_CONFIG = {
     "preferred_max_height": 1080,
     "failure_retry_window": 60,
     "custom_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "enable_tier1_modern": True,
-    "enable_tier2_proxy": True,
-    "enable_tier3_native": True
+    "enable_tier1_proxy": True,
+    "enable_tier2_modern": True,
+    "enable_tier3_native": True,
+    "debug_mode": BUILD_TYPE == "DEV"
 }
 
 # --- Global State ---
 logger = None
 CONFIG = None
 
-def setup_logging():
+def setup_logging(debug_mode):
     log_file = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
-    if os.path.exists(log_file) and os.path.getsize(log_file) > 5 * 1024 * 1024:
+    if os.path.exists(log_file) and os.path.getsize(log_file) > 10 * 1024 * 1024:
         try: os.remove(log_file)
         except: pass
-    level = logging.DEBUG
+    
+    level = logging.DEBUG if debug_mode else logging.INFO
+    
+    # We want a clean format for the log file
     logging.basicConfig(
         level=level,
-        format='%(asctime)s [%(levelname)s] %(message)s',
+        format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
         handlers=[logging.FileHandler(log_file, mode='a', encoding='utf-8')]
     )
+    
     l = logging.getLogger(WRAPPER_NAME)
     l.setLevel(level)
     return l
@@ -87,6 +92,15 @@ def load_config():
         try:
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
+                # Map old keys to new ones if they exist to prevent breakage
+                mapping = {
+                    "enable_tier1_modern": "enable_tier2_modern",
+                    "enable_tier2_proxy": "enable_tier1_proxy"
+                }
+                for old, new in mapping.items():
+                    if old in user_config and new not in user_config:
+                        user_config[new] = user_config[old]
+                
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in user_config: user_config[k] = v
                 return user_config
@@ -111,14 +125,20 @@ def detect_legacy(incoming_args, custom_ua):
         if os.path.exists(WRAPPER_STATE_PATH):
             with open(WRAPPER_STATE_PATH, 'r') as f:
                 state = json.load(f)
-                if state.get('active_player') == 'unity': return True
+                if state.get('active_player') == 'unity': 
+                    logger.debug("Legacy detected via wrapper_state (Unity)")
+                    return True
                 if state.get('active_player') == 'avpro': return False
     except: pass
     
     ua_in_args = next((incoming_args[i+1] for i, a in enumerate(incoming_args) if a == "--user-agent" and i+1 < len(incoming_args)), None)
     eff_ua = ua_in_args or custom_ua
-    if any(x in (eff_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"]): return True
-    if any("protocol^=http" in a or "protocol!*=m3u8" in a for a in incoming_args): return True
+    if any(x in (eff_ua or "") for x in ["UnityPlayer", "NSPlayer", "WMFSDK"]): 
+        logger.debug(f"Legacy detected via User-Agent: {eff_ua}")
+        return True
+    if any("protocol^=http" in a or "protocol!*=m3u8" in a for a in incoming_args): 
+        logger.debug("Legacy detected via protocol arguments")
+        return True
     return False
 
 def update_wrapper_success(target_url=None, resolved_url=None):
@@ -128,50 +148,59 @@ def update_wrapper_success(target_url=None, resolved_url=None):
             state['consecutive_errors'] = 0
             state['force_fallback'] = False
             if target_url and resolved_url:
-                state['cache'] = {target_url: {'url': resolved_url, 'expiry': time.time() + 900}}
+                if 'cache' not in state: state['cache'] = {}
+                state['cache'][target_url] = {'url': resolved_url, 'expiry': time.time() + 900}
             with open(WRAPPER_STATE_PATH, 'w') as f: json.dump(state, f)
-    except: pass
+            logger.debug(f"State updated: Success for {target_url[:50]}...")
+    except Exception as e:
+        logger.debug(f"Failed to update state on success: {e}")
 
 def process_and_execute(incoming_args):
     try:
-        logger.info(f"--- RESOLVER START ({WRAPPER_VERSION}) ---")
+        logger.info(f"--- RESOLVER START (v{WRAPPER_VERSION}) ---")
         current_time = time.time()
         target_url = find_url_in_args(incoming_args)
         
         if not target_url:
+            logger.debug("No URL found in arguments, passing to native.")
             res, code = attempt_executable(ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME, incoming_args, APP_BASE_PATH)
             if res: safe_print(res)
             return code
 
+        logger.info(f"Target URL: {target_url}")
+
         # --- STEP 1: STATE & BLACKLIST ---
-        t1_enabled = CONFIG.get("enable_tier2_proxy", True) # Proxy is T1
-        t2_enabled = CONFIG.get("enable_tier1_modern", True) # Modern is T2
+        t1_enabled = CONFIG.get("enable_tier1_proxy", True)
+        t2_enabled = CONFIG.get("enable_tier2_modern", True)
         t3_enabled = CONFIG.get("enable_tier3_native", True)
-        forced_tier = 0
+        start_tier = 1
         is_legacy = detect_legacy(incoming_args, CONFIG.get("custom_user_agent"))
         
         try:
             if os.path.exists(WRAPPER_STATE_PATH):
                 with open(WRAPPER_STATE_PATH, 'r') as f: state = json.load(f)
                 target_domain = urlparse(target_url).netloc.lower()
+                
+                # Check Domain Blacklist
                 bl = state.get('domain_blacklist', {}).get(target_domain, {})
                 if bl and current_time < bl.get('expiry', 0):
-                    failed = bl.get('failed_tiers', [])
-                    if 1 in failed: t1_enabled = False
-                    if 2 in failed and 1 in failed:
-                        t1_enabled = False; t2_enabled = True; forced_tier = 2
+                    failed_tiers = bl.get('failed_tiers', [])
+                    logger.debug(f"Domain {target_domain} has failed tiers: {failed_tiers}")
+                    if 1 in failed_tiers: t1_enabled = False
+                    if 2 in failed_tiers: t2_enabled = False
                 
-                if state.get('force_fallback', False) and current_time < state.get('fallback_until', 0): forced_tier = 2
-                
+                # Check URL Specific Escalation
                 failed_urls = state.get('failed_urls', {})
                 if target_url in failed_urls:
                     f_info = failed_urls[target_url]
-                    if current_time - f_info.get('last_request_time', 0) < CONFIG.get("failure_retry_window", 15):
-                        forced_tier = f_info.get('tier', 1) + 1
-        except Exception: pass
+                    if current_time - f_info.get('last_request_time', 0) < CONFIG.get("failure_retry_window", 60):
+                        start_tier = f_info.get('tier', 1)
+                        logger.info(f"URL-specific escalation active. Starting at Tier {start_tier}.")
+        except Exception as e:
+            logger.debug(f"Error reading state/blacklist: {e}")
 
         # --- STEP 2: CACHE ---
-        if forced_tier < 2:
+        if start_tier == 1:
             try:
                 if os.path.exists(WRAPPER_STATE_PATH):
                     with open(WRAPPER_STATE_PATH, 'r') as f: state = json.load(f)
@@ -180,8 +209,10 @@ def process_and_execute(incoming_args):
                         curl = cache[target_url]['url']
                         logger.info(f"CACHE HIT: {target_url[:50]}...")
                         if verify_stream(curl, timeout=2.0):
+                            logger.info("Cache verified. Returning.")
                             safe_print(curl); return 0
                         else:
+                            logger.warning("Cache verification failed. Purging.")
                             if 'cache' in state: del state['cache'][target_url]
                             with open(WRAPPER_STATE_PATH, 'w') as wf: json.dump(state, wf)
             except Exception: pass
@@ -193,57 +224,77 @@ def process_and_execute(incoming_args):
         player_hint = "unity" if is_legacy else "avpro"
 
         # Tier 4: Last Resort Proxy
-        if forced_tier >= 4:
+        if start_tier >= 4:
             logger.info("Tier 4: LAST RESORT Proxy.")
             res = resolve_tier_1_proxy(target_url, incoming_args, 15.0, custom_ua, REMOTE_BASE, player_hint)
-            if res: safe_print(res['url']); return 0
+            if res: 
+                logger.info("WINNER: Tier 4 (Last Resort)")
+                safe_print(res['url']); return 0
             logger.error("Tier 4: Last Resort Failed.")
             return 1
 
-        if forced_tier < 3:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                t1_f = None; t2_f = None
-                if t1_enabled and forced_tier < 1:
-                    t1_f = executor.submit(resolve_tier_1_proxy, target_url, incoming_args, 8.0, custom_ua, REMOTE_BASE, player_hint)
-                if t2_enabled and forced_tier < 2:
-                    t2_f = executor.submit(resolve_tier_2_modern, incoming_args, 30.0, custom_ua, APP_BASE_PATH, LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, CONFIG.get("preferred_max_height", 1080), is_legacy)
+        # Execution Logic
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            t1_f = None; t2_f = None
+            
+            # Submit T1 and T2 if they are allowed by start_tier
+            if t1_enabled and start_tier <= 1:
+                logger.debug(f"Submitting Tier 1 (Proxy) for: {target_url}")
+                t1_f = executor.submit(resolve_tier_1_proxy, target_url, incoming_args, 8.0, custom_ua, REMOTE_BASE, player_hint)
+            
+            if t2_enabled and start_tier <= 2:
+                logger.debug("Submitting Tier 2 (Modern yt-dlp)...")
+                t2_f = executor.submit(resolve_tier_2_modern, incoming_args, 30.0, custom_ua, APP_BASE_PATH, LATEST_YTDLP_PATH, LATEST_YTDLP_FILENAME, CONFIG.get("preferred_max_height", 1080), is_legacy)
 
-                if t1_f:
-                    try:
-                        res = t1_f.result(timeout=8.5)
-                        if res: 
-                            logger.info("WINNER: Tier 1 (Proxy)")
+            # Wait for Tier 1 first (it's the fastest)
+            if t1_f:
+                try:
+                    res = t1_f.result(timeout=8.5)
+                    if res: 
+                        logger.info("WINNER: Tier 1 (Proxy)")
+                        update_wrapper_success(target_url, res['url'])
+                        safe_print(res['url']); return 0
+                except Exception as e:
+                    logger.debug(f"Tier 1 skipped/failed: {e}")
+
+            # If T1 failed or was skipped, wait for Tier 2 specifically if it was submitted
+            if t2_f:
+                try:
+                    res = t2_f.result(timeout=25.0)
+                    if res:
+                        logger.info("WINNER: Tier 2 (Modern yt-dlp)")
+                        update_wrapper_success(target_url, res['url'])
+                        safe_print(res['url']); return 0
+                except Exception as e:
+                    logger.debug(f"Tier 2 skipped/failed: {e}")
+
+            # If T1 or T2 were running in parallel/racing but didn't finish above, clean up
+            tasks = {f: i for i, f in enumerate([t1_f, t2_f]) if f and not f.done()}
+            if tasks:
+                try:
+                    for f in as_completed(tasks, timeout=2.0):
+                        res = f.result()
+                        if res:
+                            logger.info(f"WINNER: Tier {res['tier']} (Late result)")
                             update_wrapper_success(target_url, res['url'])
                             safe_print(res['url']); return 0
-                    except Exception: pass
+                except Exception: pass
 
-                tasks = {f: i for i, f in enumerate([t1_f, t2_f]) if f and not f.done()}
-                if tasks:
-                    try:
-                        for f in as_completed(tasks, timeout=8.0):
-                            res = f.result()
-                            if res:
-                                logger.info(f"WINNER: Tier {res['tier']} (Racing)")
-                                update_wrapper_success(target_url, res['url'])
-                                safe_print(res['url']); return 0
-                    except Exception: pass
-
-                if t3_enabled:
-                    res = resolve_tier_3_native(incoming_args, 15.0, APP_BASE_PATH, ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME)
-                    if res: 
-                        logger.info("WINNER: Tier 3 (Sequential)")
-                        update_wrapper_success(target_url, res['url']); safe_print(res['url']); return 0
-        else:
-            if t3_enabled:
-                res = resolve_tier_3_native(incoming_args, 15.0, APP_BASE_PATH, ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME)
-                if res: 
-                    logger.info("WINNER: Tier 3 (Forced)")
-                    update_wrapper_success(target_url, res['url']); safe_print(res['url']); return 0
+        # Tier 3 (Native/Legacy) is sequential - we only hit it if T1/T2 fail or are forced out
+        if t3_enabled and start_tier <= 3:
+            logger.info("Attempting Tier 3 (Native yt-dlp)...")
+            res = resolve_tier_3_native(incoming_args, 15.0, APP_BASE_PATH, ORIGINAL_YTDLP_PATH, ORIGINAL_YTDLP_FILENAME)
+            if res: 
+                logger.info("WINNER: Tier 3 (Native)")
+                update_wrapper_success(target_url, res['url'])
+                safe_print(res['url']); return 0
 
         # If everything else fails, try one last proxy attempt (Tier 4)
-        logger.warning("All primary tiers failed. Final proxy attempt...")
+        logger.warning("All primary tiers (1, 2, 3) failed. Attempting Tier 4 (Absolute Last Resort Proxy)...")
         res = resolve_tier_1_proxy(target_url, incoming_args, 15.0, custom_ua, REMOTE_BASE, player_hint)
-        if res: safe_print(res['url']); return 0
+        if res: 
+            logger.info("WINNER: Tier 4 (Emergency Recovery)")
+            safe_print(res['url']); return 0
 
         logger.error(f"ALL TIERS FAILED for: {target_url}")
         return 1
@@ -257,8 +308,8 @@ def process_and_execute(incoming_args):
 def main():
     try:
         global logger, CONFIG
-        logger = setup_logging()
         CONFIG = load_config()
+        logger = setup_logging(CONFIG.get("debug_mode", BUILD_TYPE == "DEV"))
         sys.exit(process_and_execute(sys.argv[1:]))
     except Exception as e:
         sys.stderr.write(f"FATAL MAIN: {e}\n")

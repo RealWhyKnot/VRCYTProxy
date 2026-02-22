@@ -87,12 +87,16 @@ class Colors:
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
         color = Colors.RESET
+        # Priority 1: Levels (Errors/Warnings)
         if record.levelno >= logging.ERROR: color = Colors.RED
         elif record.levelno >= logging.WARNING: color = Colors.YELLOW
-        msg = str(record.msg)
-        if "[Redirector]" in msg: color = Colors.CYAN
-        elif "ENABLED" in msg or "enabled" in msg: color = Colors.GREEN
-        elif "DISABLED" in msg or "disabled" in msg: color = Colors.GREY
+        else:
+            # Priority 2: Semantic highlights for INFO/DEBUG
+            msg = str(record.msg)
+            if "ENABLED" in msg or "enabled" in msg: color = Colors.GREEN
+            elif "DISABLED" in msg or "disabled" in msg: color = Colors.GREY
+            elif "[Redirector]" in msg: color = Colors.CYAN
+            
         ts = self.formatTime(record, self.datefmt)
         return f"{Colors.GREY}{ts}{Colors.RESET} - {color}{record.getMessage()}{Colors.RESET}"
 
@@ -215,22 +219,6 @@ class LogMonitor:
                             logger.info("Log catch-up complete. Live monitoring active.")
         except: pass
 
-def get_patch_state():
-    target_hash = calculate_sha256(TARGET_YTDLP_PATH)
-    source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
-    wrapper_hash = calculate_sha256(source_wrapper_path)
-    
-    backup_hash = calculate_sha256(ORIGINAL_YTDLP_BACKUP_PATH)
-    backup_exists = backup_hash is not None and backup_hash != wrapper_hash
-    
-    if target_hash and wrapper_hash and target_hash == wrapper_hash:
-        return PatchState.ENABLED if backup_exists else PatchState.BROKEN
-    
-    if target_hash and target_hash != wrapper_hash:
-        return PatchState.DISABLED
-        
-    return PatchState.DISABLED
-
 def tail_log_file(log_path, stop_event, monitor):
     last_pos = 0
     # Wait for file to exist
@@ -249,13 +237,33 @@ def tail_log_file(log_path, stop_event, monitor):
                         f.seek(last_pos)
                         lines = f.readlines()
                         for line in lines:
-                            logger.info(f"[Redirector] {line.strip()}")
+                            line = line.strip()
+                            msg = f"[Redirector] {line}"
+                            # Parse level from [LEVEL] in line
+                            if "[ERROR]" in line: logger.error(msg)
+                            elif "[WARNING]" in line: logger.warning(msg)
+                            elif "[DEBUG]" in line: logger.debug(msg)
+                            else: logger.info(msg)
+
                             if "WINNER: Tier" in line:
                                 m = re.search(r'Tier (\d+)', line)
                                 if m: monitor.last_winner_tier = int(m.group(1))
                         last_pos = f.tell()
         except: pass
         time.sleep(1.0)
+
+def get_patch_state():
+    target_hash = calculate_sha256(TARGET_YTDLP_PATH)
+    source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
+    wrapper_hash = calculate_sha256(source_wrapper_path)
+    
+    if not wrapper_hash:
+        return PatchState.BROKEN
+
+    if target_hash and target_hash == wrapper_hash:
+        return PatchState.ENABLED
+    
+    return PatchState.DISABLED
 
 def get_process_using_file(filepath):
     """Attempts to find which process is using a file. Primarily checks for VRChat or yt-dlp."""
@@ -281,29 +289,42 @@ def get_process_using_file(filepath):
 def enable_patch(file_list):
     for attempt in range(3):
         try:
+            if not os.path.exists(SOURCE_WRAPPER_DIR):
+                logger.error(f"Source folder missing: {SOURCE_WRAPPER_DIR}")
+                return False
+
             if not os.path.exists(VRCHAT_TOOLS_DIR): os.makedirs(VRCHAT_TOOLS_DIR)
             
             # 1. Sync wrapper files
             shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
             
             # 2. Backup if target is original
+            source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
+            wh = calculate_sha256(source_wrapper_path)
+            
             if os.path.exists(TARGET_YTDLP_PATH):
                 th = calculate_sha256(TARGET_YTDLP_PATH)
-                wh = calculate_sha256(os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME))
                 if th and wh and th != wh:
-                    logger.info("Backing up original yt-dlp.exe...")
+                    logger.info(f"Backing up original yt-dlp.exe (Hash: {th[:8]}...)")
                     shutil.copy2(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH)
             
             # 3. Swap in wrapper
             shutil.copy2(os.path.join(VRCHAT_TOOLS_DIR, WRAPPER_EXE_NAME), TARGET_YTDLP_PATH)
-            logger.info("Patch ENABLED.")
-            return True
+            
+            # Final Verify
+            final_hash = calculate_sha256(TARGET_YTDLP_PATH)
+            if final_hash == wh:
+                logger.info("Patch ENABLED and verified.")
+                return True
+            else:
+                logger.error("Patch verification failed after copy!")
+                return False
         except PermissionError as e:
             if e.winerror == 32:
                 culprit = get_process_using_file(TARGET_YTDLP_PATH)
                 logger.warning(f"File locked (Attempt {attempt+1}/3): {culprit}")
                 if attempt < 2: 
-                    time.sleep(0.7)
+                    time.sleep(1.0)
                     continue
             logger.error(f"Enable failed: {e}")
         except Exception as e: 
@@ -404,6 +425,34 @@ def main():
 
     atexit.register(lambda: [job_manager.close(), disable_patch(file_list)])
     
+    # Robust signal handling
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}. Exiting cleanly...")
+        disable_patch(file_list)
+        job_manager.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    if platform.system() == 'Windows':
+        # Use ctypes to avoid pywin32 dependency while catching console close
+        PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+        
+        def console_ctrl_handler(ctrl_type):
+            # 2 = CTRL_CLOSE_EVENT, 5 = CTRL_LOGOFF_EVENT, 6 = CTRL_SHUTDOWN_EVENT
+            if ctrl_type in [2, 5, 6]:
+                # We must be very fast here, Windows only gives a few seconds
+                disable_patch(file_list)
+                job_manager.close()
+                return True
+            return False
+
+        # Keep a reference to the handler to prevent garbage collection
+        _handler = PHANDLER_ROUTINE(console_ctrl_handler)
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True):
+            logger.debug("Failed to set Console Control Handler.")
+
     logger.info("Monitoring VRChat for world changes...")
     
     while True:

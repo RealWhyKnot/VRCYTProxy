@@ -44,17 +44,20 @@ def update_wrapper_state(state_path, is_broken=False, duration=None, failed_url=
                 existing = state['failed_urls'].get(failed_url, {})
                 
                 # If we have a failed_tier (last winner), increment from that.
-                # If we have no failed_tier, use the recorded one.
-                current_tier = failed_tier if failed_tier is not None else existing.get('tier', 0)
-                new_tier = min(current_tier + 1, 4)
+                # If we have no failed_tier (total failure), increment from current.
+                current_recorded = existing.get('tier', 0)
+                
+                # If Tier 1 failed, next is Tier 2.
+                # If we don't know what failed, increment from what we last tried.
+                new_tier = min((failed_tier or current_recorded) + 1, 4)
                 
                 state['failed_urls'][failed_url] = {
                     'expiry': time.time() + 300,
                     'tier': new_tier,
-                    'last_request_time': time.time() # Always update to now
+                    'last_request_time': time.time()
                 }
                 if 'cache' in state and failed_url in state['cache']: del state['cache'][failed_url]
-                logger.warning(f"URL Failed: {failed_url[:50]}... Escalating to Tier {new_tier + 1}.")
+                logger.warning(f"URL Failed (Tier {failed_tier or '?'}). Next Attempt: Tier {new_tier}.")
             else:
                 state['force_fallback'] = True
                 wait_time = duration or (60 if count <= 1 else 300 if count == 2 else 900 if count == 3 else 3600)

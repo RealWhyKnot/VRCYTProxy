@@ -16,32 +16,53 @@ except ImportError:
 
 logger = logging.getLogger("Resolver")
 
+def get_speed_flags(executable_path):
+    """Returns a list of flags optimized for speed based on version-safe detection."""
+    is_og = "og" in executable_path.lower()
+    
+    if is_og:
+        # VRChat's custom yt-dlp-og is extremely stripped down.
+        # Only use flags verified via --help output.
+        return [
+            "--quiet",
+            "--no-cache-dir",
+            "--no-check-certificates"
+        ]
+    
+    # Standard high-speed flags for the full 'latest' yt-dlp version
+    return [
+        "--no-warnings",
+        "--ignore-errors",
+        "--no-check-certificates",
+        "--no-playlist",
+        "--no-cache-dir",
+        "--no-mtime",
+        "--no-check-formats", 
+        "--no-video-multistreams"
+    ]
+
 def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0):
     if not os.path.exists(path): return None, 1
     try:
-        start_time = time.perf_counter()
+        # 1. Prepare Environment
         env = os.environ.copy()
         temp_dir = os.path.join(app_base_path, "_tmp")
         if not os.path.exists(temp_dir): os.makedirs(temp_dir)
         env['TMP'] = temp_dir
         env['TEMP'] = temp_dir
         
-        # Performance flags to speed up yt-dlp launch/resolution
-        speed_flags = [
-            "--no-warnings", 
-            "--ignore-errors", 
-            "--no-check-certificates", 
-            "--no-cache-dir",
-            "--no-playlist",
-            "--no-call-home"
-        ]
+        # 2. Inject Speed-Up Flags
+        speed_flags = get_speed_flags(path)
+        final_args = list(args)
+        for flag in reversed(speed_flags):
+            if flag not in final_args:
+                final_args.insert(0, flag)
         
-        # Only add flags if they aren't already there
-        for flag in speed_flags:
-            if flag not in args: args.insert(0, flag)
-        
-        cmd = [path] + args
+        cmd = [path] + final_args
         logger.debug(f"Executing: {' '.join(cmd)}")
+        
+        # 3. High-Precision Launch Timing
+        launch_start = time.perf_counter()
         
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
@@ -51,8 +72,10 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
         
         try:
             stdout, stderr = process.communicate(timeout=timeout)
-            elapsed = time.perf_counter() - start_time
-            logger.debug(f"[{executable_name}] Execution took {elapsed:.3f}s")
+            elapsed = time.perf_counter() - launch_start
+            
+            # Log exact launch/resolve time in debug as requested
+            logger.debug(f"[{executable_name}] Resolution took {elapsed:.3f}s")
             
             if process.returncode == 0: return stdout.strip(), 0
             
@@ -62,7 +85,9 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
             process.kill()
             logger.debug(f"Process {executable_name} TIMED OUT.")
             return None, -1
-    except Exception: return None, 1
+    except Exception as e: 
+        logger.debug(f"Error attempting executable {executable_name}: {e}")
+        return None, 1
 
 from verifier import ssl_context
 
@@ -125,7 +150,8 @@ def resolve_tier_2_modern(incoming_args, res_timeout, custom_ua, app_base_path, 
     if is_legacy:
         args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
     else:
-        args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
+        # Use more robust format selection that handles audio-only (SoundCloud) correctly
+        args.extend(["-f", f"(bestvideo[height<={max_height}]+bestaudio)/best[height<={max_height}]"])
 
     res, code = attempt_executable(latest_path, latest_filename, args, app_base_path, timeout=res_timeout)
     if code == 0 and res:

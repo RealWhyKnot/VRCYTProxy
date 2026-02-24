@@ -35,11 +35,15 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
             if process.returncode == 0: return stdout.strip(), 0
+            logger.debug(f"{executable_name} FAILED (Code {process.returncode}). Stderr: {stderr.strip()}")
             return None, process.returncode
         except subprocess.TimeoutExpired:
             process.kill()
+            logger.debug(f"{executable_name} TIMED OUT.")
             return None, -1
     except Exception: return None, 1
+
+from verifier import ssl_context
 
 def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_server_base, player_hint):
     try:
@@ -50,23 +54,29 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
                 break
         
         resolve_url = f"{remote_server_base}/api/stream/resolve?url={quote_plus(target_url)}&video_type={video_type}&player={player_hint}"
+        logger.debug(f"Proxy Request: {resolve_url}")
         req = urllib.request.Request(resolve_url, method='GET')
         if custom_ua: req.add_header("User-Agent", custom_ua)
         
-        with urllib.request.urlopen(req, timeout=res_timeout) as response:
+        with urllib.request.urlopen(req, timeout=res_timeout, context=ssl_context) as response:
             if response.status == 200:
-                data = json.loads(response.read().decode())
-                return data.get("stream_url") or data.get("url")
-    except Exception: return None
+                body = response.read().decode()
+                logger.debug(f"Proxy Response: {body}")
+                data = json.loads(body)
+                url = data.get("stream_url") or data.get("url")
+                if url: return url
+                logger.debug(f"Proxy returned success but no URL field.")
+            else:
+                logger.debug(f"Proxy returned HTTP {response.status}")
+    except Exception as e:
+        logger.debug(f"Proxy connection failed: {e}")
+    return None
 
 def resolve_tier_1_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_base, player_hint):
-    """Tier 1: Proxy."""
+    """Tier 1: Proxy. Internal verification removed as main.py handles it."""
     url = resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_base, player_hint)
-    if url and verify_stream(url):
-        logger.info(f"Tier 1 SUCCESS (Proxy): {url[:100]}...")
+    if url:
         return {"tier": 1, "url": url}
-    elif url:
-        logger.warning("WINNER: Tier 1 (Proxy) FAILED Deep Verification.")
     return None
 
 def resolve_tier_2_modern(incoming_args, res_timeout, custom_ua, app_base_path, latest_path, latest_filename, max_height, is_legacy):
@@ -91,15 +101,13 @@ def resolve_tier_2_modern(incoming_args, res_timeout, custom_ua, app_base_path, 
         args.extend(["-f", f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"])
 
     res, code = attempt_executable(latest_path, latest_filename, args, app_base_path, timeout=res_timeout)
-    if code == 0 and res and verify_stream_with_ytdlp(latest_path, res):
-        logger.info(f"Tier 2 SUCCESS (Modern): {res[:100]}...")
+    if code == 0 and res:
         return {"tier": 2, "url": res}
     return None
 
 def resolve_tier_3_native(incoming_args, res_timeout, app_base_path, native_path, native_filename):
     """Tier 3: Native yt-dlp."""
     res, code = attempt_executable(native_path, native_filename, incoming_args, app_base_path, timeout=res_timeout)
-    if code == 0 and res and verify_stream_with_ytdlp(native_path, res):
-        logger.info("Tier 3 SUCCESS (Native).")
+    if code == 0 and res:
         return {"tier": 3, "url": res}
     return None

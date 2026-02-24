@@ -3,8 +3,10 @@ import logging
 import subprocess
 import platform
 import json
+import time
 import urllib.request
 from urllib.parse import quote_plus
+
 try:
     from jobs import job_manager
     from verifier import verify_stream, verify_stream_with_ytdlp
@@ -17,11 +19,26 @@ logger = logging.getLogger("Resolver")
 def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0):
     if not os.path.exists(path): return None, 1
     try:
+        start_time = time.perf_counter()
         env = os.environ.copy()
         temp_dir = os.path.join(app_base_path, "_tmp")
         if not os.path.exists(temp_dir): os.makedirs(temp_dir)
         env['TMP'] = temp_dir
         env['TEMP'] = temp_dir
+        
+        # Performance flags to speed up yt-dlp launch/resolution
+        speed_flags = [
+            "--no-warnings", 
+            "--ignore-errors", 
+            "--no-check-certificates", 
+            "--no-cache-dir",
+            "--no-playlist",
+            "--no-call-home"
+        ]
+        
+        # Only add flags if they aren't already there
+        for flag in speed_flags:
+            if flag not in args: args.insert(0, flag)
         
         cmd = [path] + args
         logger.debug(f"Executing: {' '.join(cmd)}")
@@ -34,9 +51,11 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
         
         try:
             stdout, stderr = process.communicate(timeout=timeout)
+            elapsed = time.perf_counter() - start_time
+            logger.debug(f"[{executable_name}] Execution took {elapsed:.3f}s")
+            
             if process.returncode == 0: return stdout.strip(), 0
             
-            # Use debug for technical failures
             logger.debug(f"Process {executable_name} FAILED (Code {process.returncode}). Stderr: {stderr.strip()}")
             return None, process.returncode
         except subprocess.TimeoutExpired:

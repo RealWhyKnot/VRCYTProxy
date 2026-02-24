@@ -137,3 +137,5 @@ dmypy.json
 cython_debug/
 .context/
 GEMINI.md
+patcher_config.json
+logs/

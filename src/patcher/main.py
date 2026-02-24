@@ -354,16 +354,39 @@ logger = setup_logging()
 # --- Shared Logic ---
 
 def load_config(config_path):
-    defaults = {"video_error_patterns": [], "instance_patterns": {}, "debug_mode": BUILD_TYPE == "DEV", "force_patch_in_public": False}
-    if os.path.exists(config_path):
+    defaults = {
+        "vrchat_log_dir": None,
+        "force_patch_in_public": False,
+        "debug_mode": BUILD_TYPE == "DEV",
+        "video_error_patterns": [
+            "Video Error: Error (3): Video player error: Source not supported",
+            "Video Error: Error (3): Video player error: Failed to resolve URL",
+            "Video Error: Error (3): Video player error: Stream not found"
+        ],
+        "instance_patterns": {
+            "invite": "~private|~canRequestInvite",
+            "friends+": "~hidden",
+            "friends": "~friends",
+            "group": "~group"
+        }
+    }
+    
+    if not os.path.exists(config_path):
         try:
-            with open(config_path, 'r', encoding='utf-8-sig') as f:
-                user_config = json.load(f)
-                for k, v in defaults.items():
-                    if k not in user_config: user_config[k] = v
-                return user_config
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(defaults, f, indent=4)
         except: pass
-    return defaults
+        return defaults
+
+    try:
+        with open(config_path, 'r', encoding='utf-8-sig') as f:
+            user_config = json.load(f)
+            # Ensure all keys exist
+            for k, v in defaults.items():
+                if k not in user_config: user_config[k] = v
+            return user_config
+    except:
+        return defaults
 
 def get_vrchat_log_dir():
     config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)

@@ -86,7 +86,7 @@ class Colors:
 
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
-        level_color = Colors.RESET
+        level_color = "" # Default to no extra color for INFO
         msg = record.getMessage()
         
         # 1. Determine level-based color
@@ -102,7 +102,9 @@ class ColoredFormatter(logging.Formatter):
             msg = msg.replace("[Redirector] ", "").replace("[Redirector]", "")
             
         ts = self.formatTime(record, self.datefmt)
-        return f"{Colors.GREY}{ts}{Colors.RESET} - {prefix}{level_color}{msg}{Colors.RESET}"
+        # Use BOLD for the main message if it's INFO to make it pop, or just RESET
+        content_color = level_color if level_color else Colors.RESET
+        return f"{Colors.GREY}{ts}{Colors.RESET} - {prefix}{content_color}{msg}{Colors.RESET}"
 
 def get_application_path():
     if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)

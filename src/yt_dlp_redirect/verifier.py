@@ -36,71 +36,89 @@ def verify_stream(url, timeout=5.0, depth=0, user_agent=None):
     try:
         # 1. Initial HEAD check (Stealthy)
         req = urllib.request.Request(url, method='HEAD', headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
-            status = resp.getcode()
-            if status >= 400: 
-                logger.debug(f"HEAD failed: HTTP {status}")
-                return False
-            
-            content_type = resp.headers.get('Content-Type', '').lower()
-            
-            # If it's a direct video/audio type, we're likely good
-            if any(x in content_type for x in ['video/', 'audio/', 'application/octet-stream']):
-                return True
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
+                status = resp.getcode()
+                content_type = resp.headers.get('Content-Type', '').lower()
                 
-            # If it's HTML, it's almost certainly a fail (login page, 404 page, etc.)
-            if 'text/html' in content_type:
-                logger.debug("HEAD result was HTML (Fail).")
-                return False
+                logger.debug(f"[Verifier] HEAD {status} - Type: {content_type} - URL: {url[:60]}...")
 
-        # 2. Manifest Deep Check (GET)
-        # If it looks like a manifest URL or the content type is mpegurl/xml
-        is_manifest_url = any(x in url.lower() for x in ['.m3u8', '.mpd', 'manifest'])
-        
+                # If it's a direct video/audio type, we're likely good
+                if any(x in content_type for x in ['video/', 'audio/', 'application/octet-stream', 'mpegurl', 'application/dash+xml']):
+                    return True
+                    
+                # If it's HTML, it's almost certainly a fail (login page, 404 page, etc.)
+                if 'text/html' in content_type:
+                    logger.debug(f"[Verifier] Rejected: Result is HTML.")
+                    return False
+        except urllib.error.HTTPError as e:
+            # Some CDNs return 403 or 405 for HEAD. We fallback to GET.
+            if e.code not in [403, 405]:
+                logger.debug(f"[Verifier] HEAD failed with HTTP {e.code}")
+                return False
+            logger.debug(f"[Verifier] HEAD returned {e.code}, falling back to GET Range.")
+
+        # 2. Manifest/Stream Deep Check (GET)
         req_get = urllib.request.Request(url, method='GET', headers=headers)
-        # We only need the first 4KB to identify the format
-        req_get.add_header('Range', 'bytes=0-4096')
+        req_get.add_header('Range', 'bytes=0-8192')
         
         with urllib.request.urlopen(req_get, timeout=timeout, context=ssl_context) as resp:
-            content = resp.read(4096).decode('utf-8', errors='ignore').strip()
+            content = resp.read(8192).decode('utf-8', errors='ignore').strip()
             content_upper = content.upper()
             
             # Signature checks
             if content_upper.startswith('#EXTM3U') or '<MPD' in content_upper or '<?XML' in content_upper:
-                # It's a manifest! 
-                # For HLS, check if it points to another manifest (master playlist)
                 if '#EXT-X-STREAM-INF' in content_upper:
-                    # Try to find the first variant and verify it
+                    # Master playlist - check first variant
                     lines = [line.strip() for line in content.split('\n') if line.strip() and not line.startswith('#')]
                     if lines:
-                        next_url = urljoin(url, lines[0])
-                        return verify_stream(next_url, timeout, depth + 1, ua)
-                return True # It's a valid manifest
+                        for line in lines:
+                            if not line.startswith('#'):
+                                next_url = urljoin(url, line)
+                                logger.debug(f"[Verifier] HLS Master found, checking variant: {next_url[:60]}...")
+                                return verify_stream(next_url, timeout, depth + 1, ua)
+                return True
                 
             # If it's not a manifest but we got data and it's not HTML, consider it verified
-            if '<HTML' not in content_upper and '<!DOCTYPE' not in content_upper:
+            if len(content) > 0 and '<HTML' not in content_upper and '<!DOCTYPE' not in content_upper:
+                logger.debug(f"[Verifier] GET Success: Binary data found ({len(content)} bytes).")
                 return True
+            else:
+                logger.debug(f"[Verifier] GET Failed: Data contains HTML or is empty.")
 
     except Exception as e: 
-        logger.debug(f"Verification error: {e}")
+        logger.debug(f"[Verifier] Exception: {e}")
     
     return False
 
-def verify_stream_with_ytdlp(ytdlp_path, url, timeout=10.0):
-    """Uses the actual yt-dlp binary to verify if a URL is playable."""
-    if not os.path.exists(ytdlp_path): return False
+def verify_stream_with_ytdlp(ytdlp_path, url, timeout=15.0):
+    """
+    Uses the actual yt-dlp binary to verify if a URL is playable.
+    """
+    if not os.path.exists(ytdlp_path): 
+        logger.debug(f"[Verifier] Binary missing: {ytdlp_path}")
+        return False
     try:
-        # --print is faster than --check-formats for simple verification
-        cmd = [ytdlp_path, "--no-warnings", "--ignore-errors", "--get-url", url]
-        proc = subprocess.Popen(
+        # --simulate --check-formats is the most accurate check yt-dlp has for actual playability
+        cmd = [ytdlp_path, "--no-warnings", "--ignore-errors", "--simulate", "--check-formats", url]
+        logger.debug(f"[Verifier] Launching binary check: {' '.join(cmd)}")
+        process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
-        job_manager.assign(proc)
+        job_manager.assign(process)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return proc.returncode == 0 and bool(stdout.strip())
+            stdout, stderr = process.communicate(timeout=timeout)
+            if process.returncode == 0:
+                logger.debug("[Verifier] Binary check PASSED.")
+                return True
+            else:
+                logger.debug(f"[Verifier] Binary check FAILED (Code {process.returncode}). Stderr: {stderr.decode(errors='ignore').strip()}")
+                return False
         except subprocess.TimeoutExpired:
-            proc.kill()
+            process.kill()
+            logger.debug("[Verifier] Binary check TIMED OUT.")
             return False
-    except Exception: return False
+    except Exception as e: 
+        logger.debug(f"[Verifier] Binary check EXCEPTION: {e}")
+        return False

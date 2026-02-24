@@ -216,6 +216,7 @@ def get_activity_renderable() -> Panel:
 
                 if level == "error": tag_style = "bold red"
                 elif level == "warning": tag_style = "bold yellow"
+                elif level == "debug": tag_style = "bold grey37"
                 table.add_row(t_str, Text(tag, style=tag_style), display_msg)
     
     title = "[bold white] Activity Timeline [/]"
@@ -338,6 +339,7 @@ def setup_logging():
                 lvl = "info"
                 if record.levelno >= logging.ERROR: lvl = "error"
                 elif record.levelno >= logging.WARNING: lvl = "warning"
+                elif record.levelno >= logging.DEBUG: lvl = "debug"
                 ui_state.add_activity(msg, lvl)
             except: pass
 

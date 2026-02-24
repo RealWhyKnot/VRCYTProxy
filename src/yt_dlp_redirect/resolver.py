@@ -4,6 +4,7 @@ import subprocess
 import platform
 import json
 import time
+import re
 import urllib.request
 from urllib.parse import quote_plus
 
@@ -148,10 +149,11 @@ def resolve_tier_2_modern(incoming_args, res_timeout, custom_ua, app_base_path, 
         args.extend(["--extractor-args", f"ejs:deno_path={deno_path}"])
 
     if is_legacy:
-        args.extend(["-f", f"best[height<={max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<={max_height}]/best"])
+        # Standard legacy format with optional metadata checks
+        args.extend(["-f", f"best[height<=?{max_height}][ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol^=http][protocol!*=m3u8][protocol!*=dash]/best[height<=?{max_height}]/best"])
     else:
-        # Use more robust format selection that handles audio-only (SoundCloud) correctly
-        args.extend(["-f", f"(bestvideo[height<={max_height}]+bestaudio)/best[height<={max_height}]"])
+        # High-performance modern format selection with optional (?) height for audio-only support
+        args.extend(["-f", f"(bestvideo[height<=?{max_height}]+bestaudio)/best[height<=?{max_height}]/best"])
 
     res, code = attempt_executable(latest_path, latest_filename, args, app_base_path, timeout=res_timeout)
     if code == 0 and res:
@@ -160,7 +162,17 @@ def resolve_tier_2_modern(incoming_args, res_timeout, custom_ua, app_base_path, 
 
 def resolve_tier_3_native(incoming_args, res_timeout, app_base_path, native_path, native_filename):
     """Tier 3: Native yt-dlp."""
-    res, code = attempt_executable(native_path, native_filename, incoming_args, app_base_path, timeout=res_timeout)
+    args = list(incoming_args)
+    # Ensure optional metadata filters are used for broad compatibility
+    if "-f" in args:
+        idx = args.index("-f")
+        if idx + 1 < len(args):
+            fmt = args[idx+1]
+            # Inject '?' into height/width constraints if not present
+            fmt = re.sub(r'\[(height|width)([<>]=?)(\d+)\]', r'[\1\2?\3]', fmt)
+            args[idx+1] = fmt
+            
+    res, code = attempt_executable(native_path, native_filename, args, app_base_path, timeout=res_timeout)
     if code == 0 and res:
         return {"tier": 3, "url": res}
     return None

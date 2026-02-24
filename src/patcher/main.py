@@ -28,6 +28,7 @@ import msvcrt
 import art
 import rich._unicode_data
 from rich.align import Align
+from rich.columns import Columns
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -51,12 +52,23 @@ POLL_INTERVAL = 1.0
 LOG_FILE_NAME = 'patcher.log'
 REDIRECTOR_LOG_NAME = 'wrapper.log'
 CONFIG_FILE_NAME = 'patcher_config.json'
-WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
+WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json' # Moving to resources
 STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
 WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
 ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
 TARGET_EXE_NAME = 'yt-dlp.exe'
 WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
+
+# --- Derived Paths ---
+LOG_DIR = os.path.join(APP_BASE_PATH, 'logs')
+if not os.path.exists(LOG_DIR):
+    try: os.makedirs(LOG_DIR, exist_ok=True)
+    except: LOG_DIR = APP_BASE_PATH # Fallback to root if folder creation fails
+
+LOG_FILE_PATH = os.path.join(LOG_DIR, LOG_FILE_NAME)
+SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
+# Internal manifest now lives in resources
+WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_FILE_LIST_NAME)
 
 if platform.system() == 'Windows':
     os.system('color')
@@ -84,12 +96,6 @@ def calculate_sha256(filepath):
         return sha256_hash.hexdigest()
     except Exception: return None
 
-# --- Global UI & Logging ---
-console = Console()
-LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
-WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
-SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
-
 class UIState:
     def __init__(self):
         self.status = "Initializing..."
@@ -97,170 +103,214 @@ class UIState:
         self.engine = "Idle"
         self.recent_activities = []
         self.scroll_offset = 0
+        self.start_time = time.time()
+        self.last_uptime = 0
+        self.stats = {"total": 0, "t1": 0, "t2": 0, "t3": 0, "t4": 0, "fail": 0}
         self.lock = threading.Lock()
+        self._dirty = True
+
+    def mark_dirty(self):
+        self._dirty = True
 
     def add_activity(self, msg, level="info"):
         with self.lock:
-            # Add new activity at the start
             self.recent_activities.insert(0, (msg, level, time.time()))
-            # Increase history for scrolling
-            if len(self.recent_activities) > 100:
+            if len(self.recent_activities) > 200:
                 self.recent_activities.pop()
-            
-            # Reset scroll when new activity arrives if user was at the top
-            if self.scroll_offset > 0:
-                self.scroll_offset += 1
+            if self.scroll_offset > 0: self.scroll_offset += 1
+            self._dirty = True
+
+    def update_stats(self, tier=None, failed=False):
+        with self.lock:
+            self.stats["total"] += 1
+            if failed: self.stats["fail"] += 1
+            elif tier: self.stats[f"t{tier}"] += 1
+            self._dirty = True
 
     def scroll(self, delta):
         with self.lock:
-            # Dynamically calculate visible count for scroll bounds
             try:
                 term_height = shutil.get_terminal_size().lines
                 visible_count = max(5, term_height - 15)
-            except:
-                visible_count = 12
-                
+            except: visible_count = 12
             max_scroll = max(0, len(self.recent_activities) - visible_count)
+            old_offset = self.scroll_offset
             self.scroll_offset = max(0, min(max_scroll, self.scroll_offset + delta))
+            if old_offset != self.scroll_offset: self._dirty = True
+
+    def check_and_reset_dirty(self) -> bool:
+        # Also dirty if uptime second changed
+        curr_uptime = int(time.time() - self.start_time)
+        if curr_uptime != self.last_uptime:
+            self.last_uptime = curr_uptime
+            return True
+            
+        if self._dirty:
+            self._dirty = False
+            return True
+        return False
 
 ui_state = UIState()
 
-class Header:
-    def __rich__(self) -> Panel:
-        try:
-            width, height = shutil.get_terminal_size()
-        except:
-            width, height = 80, 24
+def get_header_renderable() -> Panel:
+    try: width, height = shutil.get_terminal_size()
+    except: width, height = 80, 24
 
-        # Dynamic content based on size
-        if height > 15 and width > 60:
-            raw_art = art.text2art("VRCYTProxy", font="small")
-            lines = raw_art.splitlines()
-            while lines and not lines[0].strip(): lines.pop(0)
-            while lines and not lines[-1].strip(): lines.pop()
-            clean_art = "\n".join([line.rstrip() for line in lines])
-            
-            content = Group(
-                Align.center(Text(clean_art, style="bold cyan", no_wrap=True)),
-                Align.center(Text(f"VRChat Smart Redirector • {CURRENT_VERSION} • {BUILD_TYPE}", style="italic grey50"))
-            )
+    if height > 15 and width > 65:
+        banner_text = art.text2art("VRCYTProxy", font="slant").strip()
+        content = Group(
+            Align.center(Text(banner_text, style="bold cyan", no_wrap=True)),
+            Align.center(Text(f"High-Performance VRChat Video Redirector", style="italic grey70")),
+            Align.center(Text(f"{CURRENT_VERSION} • {BUILD_TYPE}", style="bold grey37"))
+        )
+    else:
+        content = Align.center(Text(f"VRCYTProxy • {CURRENT_VERSION}", style="bold cyan"))
+    return Panel(content, border_style="cyan")
+
+def get_activity_renderable() -> Panel:
+    try:
+        width, height = shutil.get_terminal_size()
+        if height <= 0: height = 24
+        header_size = 10 if (height > 15 and width > 65) else 3
+        visible_count = max(3, height - header_size - 3 - 4)
+    except:
+        visible_count = 10
+        width = 80
+
+    table = Table.grid(expand=True, padding=(0, 1))
+    table.add_column(style="grey37", width=10, no_wrap=True) # Timestamp
+    table.add_column(width=6, justify="center", no_wrap=True) # Tag
+    table.add_column(ratio=1) # Message
+    
+    with ui_state.lock:
+        max_scroll = max(0, len(ui_state.recent_activities) - visible_count)
+        ui_state.scroll_offset = min(ui_state.scroll_offset, max_scroll)
+        
+        start = ui_state.scroll_offset
+        end = start + visible_count
+        visible_items = ui_state.recent_activities[start:end]
+        total_items = len(ui_state.recent_activities)
+
+        if not visible_items:
+            table.add_row("", "", "[grey37]Waiting for activity...[/]")
         else:
-            # Compact mode
-            content = Align.center(Text(f"VRCYTProxy • {CURRENT_VERSION}", style="bold cyan"))
-        
-        return Panel(content, border_style="cyan")
-
-class ActivityLog:
-    def __rich__(self) -> Panel:
-        try:
-            width, height = shutil.get_terminal_size()
-            # Dynamic calculation of available space
-            # Header is ~8 (large) or ~3 (small), Footer is 3, Borders are 4
-            header_size = 8 if (height > 15 and width > 60) else 3
-            visible_count = max(3, height - header_size - 3 - 4)
-        except:
-            visible_count = 10
-
-        table = Table.grid(expand=True, padding=(0, 1))
-        table.add_column(style="grey37", width=10, no_wrap=True) # Timestamp
-        table.add_column(width=5, justify="center", no_wrap=True) # Indicator (RT/SYS)
-        table.add_column(ratio=1) # Message
-        
-        with ui_state.lock:
-            # Sync scrolling bounds with current window size
-            max_scroll = max(0, len(ui_state.recent_activities) - visible_count)
-            ui_state.scroll_offset = min(ui_state.scroll_offset, max_scroll)
-            
-            start = ui_state.scroll_offset
-            end = start + visible_count
-            visible_items = ui_state.recent_activities[start:end]
-            total_items = len(ui_state.recent_activities)
-
             for msg, level, ts in visible_items:
-                t_str = time.strftime("%H:%M", time.localtime(ts))
-                icon = "•"; icon_style = "grey37"; display_msg = msg
+                t_str = time.strftime("%H:%M:%S", time.localtime(ts))
+                tag = "•"; tag_style = "grey37"; display_msg = msg
                 
                 if "[Redirector]" in msg:
                     display_msg = msg.replace("[Redirector]", "").strip()
-                    icon = "RT"; icon_style = "bold cyan"
+                    tag = "REDIR"; tag_style = "bold cyan"
                     display_msg = display_msg.replace("VALIDATED", "[bold green]VALIDATED[/]")
-                    display_msg = display_msg.replace("SUCCESS", "[bold green]SUCCESS[/]")
+                    display_msg = display_msg.replace("SUCCESS", "[bold spring_green3]SUCCESS[/]")
                     display_msg = display_msg.replace("failed", "[bold red]failed[/]")
-                    display_msg = display_msg.replace("FAILED", "[bold red]FAILED[/]")
-                    display_msg = display_msg.replace("Emergency", "[bold yellow]Emergency[/]")
+                    display_msg = display_msg.replace("FAILED", "[bold dark_orange]FAILED[/]")
+                    display_msg = display_msg.replace("Cache Hit", "[bold magenta]Cache Hit[/]")
                     if "Tier" in display_msg:
-                        display_msg = re.sub(r'(Tier \d)', r'[bold magenta]\1[/]', display_msg)
+                        display_msg = re.sub(r'(Tier \d)', r'[bold sky_blue1]\1[/]', display_msg)
                 elif "[System]" in msg:
                     display_msg = msg.replace("[System]", "").strip()
-                    icon = "SYS"; icon_style = "bold white"
-                    if "ENABLED" in display_msg: display_msg = f"[bold green]{display_msg}[/]"
+                    tag = "SYSTEM"; tag_style = "bold white"
+                    if "ENABLED" in display_msg: display_msg = f"[bold spring_green3]{display_msg}[/]"
+                    if "DISABLED" in display_msg: display_msg = f"[bold grey50]{display_msg}[/]"
 
-                if level == "error": icon_style = "bold red"
-                elif level == "warning": icon_style = "bold yellow"
-                table.add_row(t_str, Text(icon, style=icon_style), display_msg)
+                if level == "error": tag_style = "bold red"
+                elif level == "warning": tag_style = "bold yellow"
+                table.add_row(t_str, Text(tag, style=tag_style), display_msg)
+    
+    title = "[bold white] Activity Timeline [/]"
+    if width > 60:
+        scroll_hint = f"[grey37](Scroll: {start+1}-{min(end, total_items)} of {total_items} | ↑/↓ Arrows)[/]"
+        title = f"[bold white] Activity Timeline {scroll_hint} [/]"
         
-        # Responsive title
-        title = "[bold white] Activity Feed [/]"
-        if width > 50:
-            scroll_hint = f"[grey37](Scroll: {start+1}-{min(end, total_items)} of {total_items} | ↑/↓ Keys)[/]"
-            title = f"[bold white] Activity Feed {scroll_hint} [/]"
-            
-        return Panel(table, title=title, border_style="grey23", padding=(1, 2))
+    return Panel(table, title=title, border_style="grey23", padding=(1, 2))
 
-class Footer:
-    def __rich__(self) -> Panel:
-        try: width, _ = shutil.get_terminal_size()
-        except: width = 80
+from rich.columns import Columns
 
-        world_colors = {"public": "yellow", "private": "magenta", "invite": "magenta", "friends": "green", "friends+": "green", "group": "blue"}
-        w_col = world_colors.get(ui_state.world.lower(), "grey50")
-        
-        grid = Table.grid(expand=True)
-        grid.add_column(ratio=1)
-        if width > 40:
-            grid.add_column(justify="right")
-        
-        status_line = Text()
-        status_line.append(Spinner("dots", style="cyan").render(time.time()))
-        status_line.append(f" {ui_state.status}", style="bold white")
-        
-        if width > 40:
-            info_line = Text.assemble(
-                (" World: ", "grey70"), (ui_state.world.upper(), f"bold {w_col}"),
-                (" │ ", "grey37"),
-                (" Engine: ", "grey70"), (ui_state.engine.upper(), "bold magenta")
-            )
-            grid.add_row(status_line, info_line)
-        else:
-            grid.add_row(status_line)
-            
-        return Panel(grid, border_style="grey23")
+def get_footer_renderable() -> Panel:
+    try: width, _ = shutil.get_terminal_size()
+    except: width = 80
 
-def make_layout() -> Layout:
+    uptime = int(time.time() - ui_state.start_time)
+    h, m = divmod(uptime // 60, 60); s = uptime % 60
+    uptime_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+    # Determine dynamic icon and style based on status
+    status_lower = ui_state.status.lower()
+    if "active" in status_lower:
+        icon = Spinner("dots", style="bold cyan")
+    elif "patching" in status_lower or "applying" in status_lower or "removing" in status_lower:
+        icon = Spinner("aesthetic", style="bold yellow")
+    else:
+        icon = "ℹ"
+
+    # Status Group
+    status_group = Group(
+        Text.assemble(
+            (f" {ui_state.status}", "bold white"),
+            (f"  Up: {uptime_str}", "grey37")
+        )
+    )
+
+    grid = Table.grid(expand=True)
+    grid.add_column(ratio=1)
+    if width > 60: grid.add_column(justify="right")
+    
+    # Left side: Icon + Status
+    left_side = Columns([icon, status_group])
+    
+    if width > 60:
+        s = ui_state.stats
+        stats_line = Text.assemble(
+            ("Resolutions: ", "grey70"),
+            (f"{s['t1']}", "bold magenta"), ("/", "grey37"),
+            (f"{s['t2']}", "bold blue"), ("/", "grey37"),
+            (f"{s['t3']}", "bold cyan"), ("/", "grey37"),
+            (f"{s['fail']}", "bold red"),
+            ("  │  World: ", "grey70"), (ui_state.world.upper(), "bold green" if ui_state.world != "public" else "bold yellow"),
+            (" │ Engine: ", "grey70"), (ui_state.engine.upper(), "bold magenta")
+        )
+        grid.add_row(left_side, stats_line)
+    else:
+        grid.add_row(left_side)
+        
+    return Panel(grid, border_style="grey23")
+
+def build_full_ui() -> Layout:
     layout = Layout()
     try:
         width, height = shutil.get_terminal_size()
     except:
         width, height = 80, 24
 
-    # Dynamically adjust the header size based on whether art will be shown
-    header_size = 8 if (height > 15 and width > 60) else 3
+    header_size = 10 if (height > 15 and width > 65) else 3
     
-    if height > 10:
+    if height > 12:
         layout.split_column(
-            Layout(name="header", size=header_size),
-            Layout(name="body"),
-            Layout(name="footer", size=3),
+            Layout(get_header_renderable(), name="header", size=header_size),
+            Layout(get_activity_renderable(), name="body"),
+            Layout(get_footer_renderable(), name="footer", size=3),
+        )
+    elif height > 6:
+        layout.split_column(
+            Layout(get_header_renderable(), name="header", size=3),
+            Layout(get_activity_renderable(), name="body"),
+            Layout(get_footer_renderable(), name="footer", size=3)
         )
     else:
-        # Ultra-compact mode for tiny windows
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="body")
-        )
+        layout.split_column(Layout(get_activity_renderable(), name="body"))
+    
     return layout
 
+# --- Global UI & Logging ---
+console = Console()
+
 def setup_logging():
+    # Ensure log directory exists
+    if not os.path.exists(LOG_DIR):
+        try: os.makedirs(LOG_DIR, exist_ok=True)
+        except: pass
+
     config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
     defaults = {"debug_mode": BUILD_TYPE == "DEV"}
     if os.path.exists(config_path):
@@ -325,10 +375,11 @@ def get_vrchat_log_dir():
 CONFIG = {}
 VRCHAT_LOG_DIR = None; VRCHAT_TOOLS_DIR = None; TARGET_YTDLP_PATH = None
 ORIGINAL_YTDLP_BACKUP_PATH = None; REDIRECTOR_LOG_PATH = None; WRAPPER_STATE_PATH = None
+system_mutex = None
 
 class LogMonitor:
     def __init__(self):
-        self.current_log = None; self.last_pos = 0; self.last_instance_type = "private"
+        self.current_log = None; self.last_pos = 0; self.last_instance_type = "public"
         self.last_attempted_url = None; self.last_winner_tier = None; self.is_initial_scan = False
 
     def update_log_file(self, path):
@@ -348,7 +399,6 @@ class LogMonitor:
                     f.seek(self.last_pos)
                     lines = f.readlines()
                     if lines:
-                        self.last_pos = f.tell()
                         for line in lines:
                             if "[AVProVideo] Opening" in line:
                                 m = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
@@ -357,17 +407,19 @@ class LogMonitor:
                                 m = re.search(r'(?:Loading|Opening)\s+(https?://[^\s\)]+)', line)
                                 if not self.is_initial_scan: update_wrapper_state(WRAPPER_STATE_PATH, active_player='unity')
                             
-                            if '[Behaviour] Destination set:' in line or '[Behaviour] Joining wrld_' in line:
+                            if '[Behaviour] Destination set:' in line or '[Behaviour] Joining wrld_' in line or '[Behaviour] Entering Room:' in line:
                                 it = 'public'
-                                if '~private' in line: it = 'invite'
+                                if '~private' in line or '~canRequestInvite' in line: it = 'invite'
                                 elif '~hidden' in line: it = 'friends+'
                                 elif '~friends' in line: it = 'friends'
                                 elif '~group' in line: it = 'group'
+                                
                                 if it != self.last_instance_type:
                                     if not self.is_initial_scan:
                                         logger.info(f"[System] Instance changed -> {it.upper()}")
                                     self.last_instance_type = it
                                     update_wrapper_state(WRAPPER_STATE_PATH, active_player='unknown')
+                        self.last_pos = f.tell()
                         if self.is_initial_scan:
                             self.is_initial_scan = False
                             logger.info("[System] Log catch-up complete.")
@@ -400,6 +452,13 @@ def tail_log_file(log_path, stop_event):
                             full_msg = f"[Redirector] {clean_msg}"
                             
                             # Detect level from the raw line
+                            # Update stats based on results
+                            if "VALIDATED" in line or "SUCCESS" in line:
+                                tier_match = re.search(r'Tier (\d)', line)
+                                if tier_match: ui_state.update_stats(tier=int(tier_match.group(1)))
+                            elif "failed" in line or "FAILED" in line:
+                                if "[Redirector]" in full_msg: ui_state.update_stats(failed=True)
+
                             if "[ERROR]" in line: logger.error(full_msg)
                             elif "[WARNING]" in line: logger.warning(full_msg)
                             elif "[DEBUG]" in line: logger.debug(full_msg)
@@ -457,12 +516,12 @@ def disable_patch(file_list):
     except: return False
 
 def main():
-    global CONFIG, VRCHAT_LOG_DIR, VRCHAT_TOOLS_DIR, TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH, REDIRECTOR_LOG_PATH, WRAPPER_STATE_PATH
+    global CONFIG, VRCHAT_LOG_DIR, VRCHAT_TOOLS_DIR, TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH, REDIRECTOR_LOG_PATH, WRAPPER_STATE_PATH, system_mutex
     
     if platform.system() == 'Windows':
         mutex_name = r"Global\VRCYTProxy_Patcher_Mutex"
         kernel32 = ctypes.windll.kernel32
-        mutex = kernel32.CreateMutexW(None, False, mutex_name)
+        system_mutex = kernel32.CreateMutexW(None, False, mutex_name)
         if kernel32.GetLastError() == 183:
             print("\n[CRITICAL] VRCYTProxy is already running.\n")
             time.sleep(3); sys.exit(1)
@@ -494,11 +553,19 @@ def main():
             logs = glob.glob(os.path.join(VRCHAT_LOG_DIR, 'output_log_*.txt'))
             if logs: monitor.update_log_file(max(logs, key=os.path.getmtime))
             monitor.tick()
-            ui_state.world = monitor.last_instance_type
+            
+            if ui_state.world != monitor.last_instance_type:
+                ui_state.world = monitor.last_instance_type
+                ui_state.mark_dirty()
+
             try:
                 if os.path.exists(WRAPPER_STATE_PATH):
                     with open(WRAPPER_STATE_PATH, 'r') as f:
-                        s = json.load(f); ui_state.engine = s.get('active_player', 'unknown')
+                        s = json.load(f)
+                        new_engine = s.get('active_player', 'unknown')
+                        if ui_state.engine != new_engine:
+                            ui_state.engine = new_engine
+                            ui_state.mark_dirty()
             except: pass
             time.sleep(0.5)
     threading.Thread(target=vrc_monitor_loop, daemon=True).start()
@@ -510,50 +577,47 @@ def main():
 
     with Live(screen=True, refresh_per_second=10) as live:
         while True:
-            # 1. Update Layout (Handles Resizing)
-            layout = make_layout()
-            
-            # Safe update of layout sections
-            try: layout["header"].update(Header())
-            except KeyError: pass
-            
-            try: layout["body"].update(ActivityLog())
-            except KeyError: pass
-            
-            try: layout["footer"].update(Footer())
-            except KeyError: pass
-            
-            live.update(layout)
+            # 1. Regenerate UI only if dirty (Performance Optimization)
+            if ui_state.check_and_reset_dirty():
+                live.update(build_full_ui())
 
             # 2. Handle Input (Non-blocking)
             if msvcrt.kbhit():
                 key = msvcrt.getch()
-                if key == b'\x00' or key == b'\xe0': # Special key prefix
+                if key == b'\x00' or key == b'\xe0':
                     key = msvcrt.getch()
-                    if key == b'H': ui_state.scroll(-1)   # Up
-                    elif key == b'P': ui_state.scroll(1)  # Down
-                    elif key == b'I': ui_state.scroll(-10) # PgUp
-                    elif key == b'G': ui_state.scroll(10)  # PgDn
+                    if key == b'H': ui_state.scroll(-1)
+                    elif key == b'P': ui_state.scroll(1)
+                    elif key == b'I': ui_state.scroll(-10)
+                    elif key == b'G': ui_state.scroll(10)
 
-            # 2. Logic & States
+            # 3. Logic & States
             should_be_enabled = CONFIG.get("force_patch_in_public", False) or (monitor.last_instance_type not in ['public', 'group_public'])
             current_state = get_patch_state()
             
             if should_be_enabled:
-                ui_state.status = "System Active"
+                new_status = "System Active"
                 if current_state != PatchState.ENABLED:
-                    ui_state.status = "Applying Patch..."
+                    new_status = "Applying Patch..."
                     enable_patch(file_list)
+                
+                if ui_state.status != new_status:
+                    ui_state.status = new_status
+                    ui_state.mark_dirty()
             else:
-                ui_state.status = "Idle (Public)"
+                new_status = "Idle (Public)"
                 if current_state == PatchState.ENABLED:
-                    ui_state.status = "Removing Patch..."
+                    new_status = "Removing Patch..."
                     disable_patch(file_list)
+                
+                if ui_state.status != new_status:
+                    ui_state.status = new_status
+                    ui_state.mark_dirty()
             
             if current_state == PatchState.ENABLED:
                 check_wrapper_health(file_list, VRCHAT_TOOLS_DIR, SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
             
-            time.sleep(0.05) # Faster poll for snappy input
+            time.sleep(0.05)
 
 if __name__ == '__main__':
     main()

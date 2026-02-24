@@ -292,18 +292,22 @@ try {
 
     & $CondaCmd run -n $CondaEnvName python -m PyInstaller @RedirectorArgs
 
+    $DistResources = Join-Path $DistDir "resources"
+    $WrapperFileListJson = Join-Path $DistResources "wrapper_filelist.json"
+    
     $WrapperBuildPath = Join-Path $RedirectorBuildDir "yt-dlp-wrapper"
     $WrapperFiles = (Get-ChildItem -Path $WrapperBuildPath | Select-Object -ExpandProperty Name) + "deno.exe" + "yt-dlp-latest.exe"
     
-    # Explicitly ensure _internal is in the list if it exists as a directory
+    # Explicitly ensure _internal is in the list
     if (Test-Path (Join-Path $WrapperBuildPath "_internal")) {
         if ("_internal" -notin $WrapperFiles) {
             $WrapperFiles += "_internal"
         }
     }
     
+    if (-not (Test-Path $DistResources)) { New-Item -ItemType Directory -Path $DistResources -Force | Out-Null }
     $WrapperFiles | ConvertTo-Json -Compress | Out-File -FilePath $WrapperFileListJson -Encoding ascii
-    Write-Host "   -> Wrapper file list generated ($($WrapperFiles.Count) files)."
+    Write-Host "   -> Wrapper file list generated ($($WrapperFiles.Count) files) in resources."
 
     $VersionFile = Join-Path $SrcPatcherDir "_version.py"
     
@@ -335,7 +339,9 @@ try {
     
     if (Test-Path $PatcherExe) {
         # Copy required files for smoke test to work
-        Copy-Item $WrapperFileListJson -Destination $PatcherExeDir -Force
+        $ResourcesSubDir = Join-Path $PatcherExeDir "resources"
+        if (-not (Test-Path $ResourcesSubDir)) { New-Item -ItemType Directory -Path $ResourcesSubDir -Force | Out-Null }
+        Copy-Item $WrapperFileListJson -Destination $ResourcesSubDir -Force
         Copy-Item -Recurse $ResourcesDir -Destination $PatcherExeDir -Force
         
         Write-Host "   -> Starting patcher.exe for stability check (5s)..." -NoNewline

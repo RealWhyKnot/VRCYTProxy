@@ -19,14 +19,23 @@ from logging.handlers import RotatingFileHandler
 import platform
 import json
 from enum import Enum, auto
-import urllib.request
-import urllib.error
 import atexit
 import signal
 import ctypes
 import hashlib
-import msvcrt
 import subprocess
+import msvcrt
+import art
+import rich._unicode_data
+from rich.align import Align
+from rich.console import Console, Group
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.logging import RichHandler
+from rich.text import Text
+from rich.spinner import Spinner
 
 try:
     from jobs import job_manager
@@ -37,6 +46,17 @@ except ImportError:
     from .state import update_wrapper_state
     from .health import check_wrapper_health
 
+# --- Constants ---
+POLL_INTERVAL = 1.0 
+LOG_FILE_NAME = 'patcher.log'
+REDIRECTOR_LOG_NAME = 'wrapper.log'
+CONFIG_FILE_NAME = 'patcher_config.json'
+WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
+STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
+WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
+ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
+TARGET_EXE_NAME = 'yt-dlp.exe'
+WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
 
 if platform.system() == 'Windows':
     os.system('color')
@@ -48,26 +68,11 @@ except ImportError:
     CURRENT_VERSION = "vDEV"
     BUILD_TYPE = "DEV"
 
-GITHUB_REPO_OWNER = "RealWhyKnot"
-GITHUB_REPO_NAME = "VRCYTProxy"
-
 class PatchState(Enum):
     UNKNOWN = auto()
     ENABLED = auto()
     DISABLED = auto()
     BROKEN = auto()
-
-POLL_INTERVAL = 1.0 
-LOG_FILE_NAME = 'patcher.log'
-REDIRECTOR_LOG_NAME = 'wrapper.log'
-CONFIG_FILE_NAME = 'patcher_config.json'
-WRAPPER_FILE_LIST_NAME = 'wrapper_filelist.json'
-STARTUP_SCAN_DEPTH = 300 * 1024 * 1024
-WRAPPER_EXE_NAME = 'yt-dlp-wrapper.exe'
-ORIGINAL_EXE_NAME = 'yt-dlp-og.exe'
-SECURE_BACKUP_NAME = 'yt-dlp-og-secure.exe'
-TARGET_EXE_NAME = 'yt-dlp.exe'
-WRAPPER_SOURCE_DIR_NAME = 'wrapper_files'
 
 def calculate_sha256(filepath):
     if not os.path.exists(filepath): return None
@@ -79,44 +84,225 @@ def calculate_sha256(filepath):
         return sha256_hash.hexdigest()
     except Exception: return None
 
-class Colors:
-    RESET = "\033[0m"; RED = "\033[91m"; GREEN = "\033[92m"; YELLOW = "\033[93m"
-    BLUE = "\033[94m"; MAGENTA = "\033[95m"; CYAN = "\033[96m"; GREY = "\033[90m"
-    BOLD = "\033[1m"; BG_RED = "\033[41m"
-
-class ColoredFormatter(logging.Formatter):
-    def format(self, record):
-        level_color = "" # Default to no extra color for INFO
-        msg = record.getMessage()
-        
-        # 1. Determine level-based color
-        if record.levelno >= logging.ERROR: level_color = Colors.RED
-        elif record.levelno >= logging.WARNING: level_color = Colors.YELLOW
-        elif "ENABLED" in msg or "enabled" in msg: level_color = Colors.GREEN
-        elif "DISABLED" in msg or "disabled" in msg: level_color = Colors.GREY
-        
-        # 2. Handle [Redirector] tag specifically
-        prefix = ""
-        if "[Redirector]" in msg:
-            prefix = f"{Colors.CYAN}[Redirector]{Colors.RESET} "
-            msg = msg.replace("[Redirector] ", "").replace("[Redirector]", "")
-            
-        ts = self.formatTime(record, self.datefmt)
-        # Use BOLD for the main message if it's INFO to make it pop, or just RESET
-        content_color = level_color if level_color else Colors.RESET
-        return f"{Colors.GREY}{ts}{Colors.RESET} - {prefix}{content_color}{msg}{Colors.RESET}"
-
-def get_application_path():
-    if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-APP_BASE_PATH = get_application_path()
+# --- Global UI & Logging ---
+console = Console()
 LOG_FILE_PATH = os.path.join(APP_BASE_PATH, LOG_FILE_NAME)
 WRAPPER_FILE_LIST_PATH = os.path.join(APP_BASE_PATH, WRAPPER_FILE_LIST_NAME)
 SOURCE_WRAPPER_DIR = os.path.join(APP_BASE_PATH, 'resources', WRAPPER_SOURCE_DIR_NAME)
 
+class UIState:
+    def __init__(self):
+        self.status = "Initializing..."
+        self.world = "Unknown"
+        self.engine = "Idle"
+        self.recent_activities = []
+        self.scroll_offset = 0
+        self.lock = threading.Lock()
+
+    def add_activity(self, msg, level="info"):
+        with self.lock:
+            # Add new activity at the start
+            self.recent_activities.insert(0, (msg, level, time.time()))
+            # Increase history for scrolling
+            if len(self.recent_activities) > 100:
+                self.recent_activities.pop()
+            
+            # Reset scroll when new activity arrives if user was at the top
+            if self.scroll_offset > 0:
+                self.scroll_offset += 1
+
+    def scroll(self, delta):
+        with self.lock:
+            # Dynamically calculate visible count for scroll bounds
+            try:
+                term_height = shutil.get_terminal_size().lines
+                visible_count = max(5, term_height - 15)
+            except:
+                visible_count = 12
+                
+            max_scroll = max(0, len(self.recent_activities) - visible_count)
+            self.scroll_offset = max(0, min(max_scroll, self.scroll_offset + delta))
+
+ui_state = UIState()
+
+class Header:
+    def __rich__(self) -> Panel:
+        try:
+            width, height = shutil.get_terminal_size()
+        except:
+            width, height = 80, 24
+
+        # Dynamic content based on size
+        if height > 15 and width > 60:
+            raw_art = art.text2art("VRCYTProxy", font="small")
+            lines = raw_art.splitlines()
+            while lines and not lines[0].strip(): lines.pop(0)
+            while lines and not lines[-1].strip(): lines.pop()
+            clean_art = "\n".join([line.rstrip() for line in lines])
+            
+            content = Group(
+                Align.center(Text(clean_art, style="bold cyan", no_wrap=True)),
+                Align.center(Text(f"VRChat Smart Redirector • {CURRENT_VERSION} • {BUILD_TYPE}", style="italic grey50"))
+            )
+        else:
+            # Compact mode
+            content = Align.center(Text(f"VRCYTProxy • {CURRENT_VERSION}", style="bold cyan"))
+        
+        return Panel(content, border_style="cyan")
+
+class ActivityLog:
+    def __rich__(self) -> Panel:
+        try:
+            width, height = shutil.get_terminal_size()
+            # Dynamic calculation of available space
+            # Header is ~8 (large) or ~3 (small), Footer is 3, Borders are 4
+            header_size = 8 if (height > 15 and width > 60) else 3
+            visible_count = max(3, height - header_size - 3 - 4)
+        except:
+            visible_count = 10
+
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(style="grey37", width=10, no_wrap=True) # Timestamp
+        table.add_column(width=5, justify="center", no_wrap=True) # Indicator (RT/SYS)
+        table.add_column(ratio=1) # Message
+        
+        with ui_state.lock:
+            # Sync scrolling bounds with current window size
+            max_scroll = max(0, len(ui_state.recent_activities) - visible_count)
+            ui_state.scroll_offset = min(ui_state.scroll_offset, max_scroll)
+            
+            start = ui_state.scroll_offset
+            end = start + visible_count
+            visible_items = ui_state.recent_activities[start:end]
+            total_items = len(ui_state.recent_activities)
+
+            for msg, level, ts in visible_items:
+                t_str = time.strftime("%H:%M", time.localtime(ts))
+                icon = "•"; icon_style = "grey37"; display_msg = msg
+                
+                if "[Redirector]" in msg:
+                    display_msg = msg.replace("[Redirector]", "").strip()
+                    icon = "RT"; icon_style = "bold cyan"
+                    display_msg = display_msg.replace("VALIDATED", "[bold green]VALIDATED[/]")
+                    display_msg = display_msg.replace("SUCCESS", "[bold green]SUCCESS[/]")
+                    display_msg = display_msg.replace("failed", "[bold red]failed[/]")
+                    display_msg = display_msg.replace("FAILED", "[bold red]FAILED[/]")
+                    display_msg = display_msg.replace("Emergency", "[bold yellow]Emergency[/]")
+                    if "Tier" in display_msg:
+                        display_msg = re.sub(r'(Tier \d)', r'[bold magenta]\1[/]', display_msg)
+                elif "[System]" in msg:
+                    display_msg = msg.replace("[System]", "").strip()
+                    icon = "SYS"; icon_style = "bold white"
+                    if "ENABLED" in display_msg: display_msg = f"[bold green]{display_msg}[/]"
+
+                if level == "error": icon_style = "bold red"
+                elif level == "warning": icon_style = "bold yellow"
+                table.add_row(t_str, Text(icon, style=icon_style), display_msg)
+        
+        # Responsive title
+        title = "[bold white] Activity Feed [/]"
+        if width > 50:
+            scroll_hint = f"[grey37](Scroll: {start+1}-{min(end, total_items)} of {total_items} | ↑/↓ Keys)[/]"
+            title = f"[bold white] Activity Feed {scroll_hint} [/]"
+            
+        return Panel(table, title=title, border_style="grey23", padding=(1, 2))
+
+class Footer:
+    def __rich__(self) -> Panel:
+        try: width, _ = shutil.get_terminal_size()
+        except: width = 80
+
+        world_colors = {"public": "yellow", "private": "magenta", "invite": "magenta", "friends": "green", "friends+": "green", "group": "blue"}
+        w_col = world_colors.get(ui_state.world.lower(), "grey50")
+        
+        grid = Table.grid(expand=True)
+        grid.add_column(ratio=1)
+        if width > 40:
+            grid.add_column(justify="right")
+        
+        status_line = Text()
+        status_line.append(Spinner("dots", style="cyan").render(time.time()))
+        status_line.append(f" {ui_state.status}", style="bold white")
+        
+        if width > 40:
+            info_line = Text.assemble(
+                (" World: ", "grey70"), (ui_state.world.upper(), f"bold {w_col}"),
+                (" │ ", "grey37"),
+                (" Engine: ", "grey70"), (ui_state.engine.upper(), "bold magenta")
+            )
+            grid.add_row(status_line, info_line)
+        else:
+            grid.add_row(status_line)
+            
+        return Panel(grid, border_style="grey23")
+
+def make_layout() -> Layout:
+    layout = Layout()
+    try:
+        width, height = shutil.get_terminal_size()
+    except:
+        width, height = 80, 24
+
+    # Dynamically adjust the header size based on whether art will be shown
+    header_size = 8 if (height > 15 and width > 60) else 3
+    
+    if height > 10:
+        layout.split_column(
+            Layout(name="header", size=header_size),
+            Layout(name="body"),
+            Layout(name="footer", size=3),
+        )
+    else:
+        # Ultra-compact mode for tiny windows
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body")
+        )
+    return layout
+
+def setup_logging():
+    config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
+    defaults = {"debug_mode": BUILD_TYPE == "DEV"}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f: defaults.update(json.load(f))
+        except: pass
+    
+    level = logging.DEBUG if defaults.get("debug_mode") else logging.INFO
+    
+    # Standard logger for file
+    logger = logging.getLogger('Patcher')
+    logger.setLevel(level)
+    
+    try:
+        fh = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(fh)
+    except: pass
+
+    # Custom Handler to feed UI
+    class UIHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                lvl = "info"
+                if record.levelno >= logging.ERROR: lvl = "error"
+                elif record.levelno >= logging.WARNING: lvl = "warning"
+                ui_state.add_activity(msg, lvl)
+            except: pass
+
+    uh = UIHandler()
+    uh.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(uh)
+    
+    return logger
+
+logger = setup_logging()
+
+# --- Shared Logic ---
+
 def load_config(config_path):
-    defaults = {"video_error_patterns": ["[Video Player] Failed to load", "VideoError", "[AVProVideo] Error", "PlayerError"], "instance_patterns": {"invite": "~private", "friends+": "~hidden", "friends": "~friends", "group": "~group"}, "debug_mode": BUILD_TYPE == "DEV", "force_patch_in_public": False, "auto_update_check": True, "first_run": True, "enable_tier1_modern": True, "enable_tier2_proxy": True, "enable_tier3_native": True}
+    defaults = {"video_error_patterns": [], "instance_patterns": {}, "debug_mode": BUILD_TYPE == "DEV", "force_patch_in_public": False}
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r', encoding='utf-8-sig') as f:
@@ -127,51 +313,28 @@ def load_config(config_path):
         except: pass
     return defaults
 
-def setup_logging():
-    logger = logging.getLogger('Patcher')
-    config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
-    cfg = load_config(config_path)
-    level = logging.DEBUG if cfg.get("debug_mode") else logging.INFO
-    logger.setLevel(level)
-    ch = logging.StreamHandler(sys.stdout); ch.setFormatter(ColoredFormatter('%(asctime)s - %(message)s'))
-    logger.addHandler(ch)
-    try:
-        # Use 'w' (write) to wipe log each run
-        fh = RotatingFileHandler(LOG_FILE_PATH, mode='w', maxBytes=10*1024*1024, backupCount=3, encoding='utf-8')
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(fh)
-    except: pass
-    return logger
-
-logger = setup_logging()
-
 def get_vrchat_log_dir():
     config_path = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
     cfg = load_config(config_path)
     log_dir = cfg.get('vrchat_log_dir')
     if log_dir and os.path.exists(log_dir): return log_dir
     default = os.path.join(os.path.expanduser('~'), 'AppData', 'LocalLow', 'VRChat', 'VRChat')
-    if os.path.exists(default): return default
-    return input("Enter VRChat log path: ").strip()
+    return default if os.path.exists(default) else None
 
 # --- Global Logic Variables ---
 CONFIG = {}
 VRCHAT_LOG_DIR = None; VRCHAT_TOOLS_DIR = None; TARGET_YTDLP_PATH = None
-ORIGINAL_YTDLP_BACKUP_PATH = None; SECURE_BACKUP_PATH = None
-REDIRECTOR_LOG_PATH = None; WRAPPER_STATE_PATH = None
+ORIGINAL_YTDLP_BACKUP_PATH = None; REDIRECTOR_LOG_PATH = None; WRAPPER_STATE_PATH = None
 
 class LogMonitor:
     def __init__(self):
         self.current_log = None; self.last_pos = 0; self.last_instance_type = "private"
-        self.proxy_domain = "whyknot.dev"; self.error_patterns = CONFIG.get("video_error_patterns", [])
         self.last_attempted_url = None; self.last_winner_tier = None; self.is_initial_scan = False
-        self.resolved_to_source = {}; self.last_error_time = 0
 
     def update_log_file(self, path):
         if path != self.current_log:
             self.current_log = path; self.last_pos = 0; self.is_initial_scan = True
-            self.last_error_time = 0 # Reset on log switch
-            logger.info(f"Monitoring Log: {os.path.basename(path)}")
+            logger.info(f"[System] Monitoring Log: {os.path.basename(path)}")
             try: self.last_pos = max(0, os.path.getsize(path) - STARTUP_SCAN_DEPTH)
             except: pass
 
@@ -186,50 +349,35 @@ class LogMonitor:
                     lines = f.readlines()
                     if lines:
                         self.last_pos = f.tell()
-                        now = time.time()
                         for line in lines:
-                            if "[Video Playback] URL '" in line:
-                                parts = line.split("'")
-                                if len(parts) >= 4: self.resolved_to_source[parts[3]] = parts[1]
                             if "[AVProVideo] Opening" in line:
                                 m = re.search(r'Opening\s+(https?://[^\s\)]+)', line)
-                                self.last_attempted_url = m.group(1) if m else None
                                 if not self.is_initial_scan: update_wrapper_state(WRAPPER_STATE_PATH, active_player='avpro')
                             if "[VideoPlayer] Loading" in line or "[VideoPlayer] Opening" in line:
                                 m = re.search(r'(?:Loading|Opening)\s+(https?://[^\s\)]+)', line)
-                                self.last_attempted_url = m.group(1) if m else None
                                 if not self.is_initial_scan: update_wrapper_state(WRAPPER_STATE_PATH, active_player='unity')
                             
-                            # Instance Detection
                             if '[Behaviour] Destination set:' in line or '[Behaviour] Joining wrld_' in line:
                                 it = 'public'
                                 if '~private' in line: it = 'invite'
                                 elif '~hidden' in line: it = 'friends+'
                                 elif '~friends' in line: it = 'friends'
                                 elif '~group' in line: it = 'group'
-                                
                                 if it != self.last_instance_type:
                                     if not self.is_initial_scan:
-                                        logger.info(f"Instance changed: {self.last_instance_type} -> {it}")
+                                        logger.info(f"[System] Instance changed -> {it.upper()}")
                                     self.last_instance_type = it
                                     update_wrapper_state(WRAPPER_STATE_PATH, active_player='unknown')
-                        
                         if self.is_initial_scan:
                             self.is_initial_scan = False
-                            logger.info("Log catch-up complete. Live monitoring active.")
+                            logger.info("[System] Log catch-up complete.")
         except: pass
 
-def tail_log_file(log_path, stop_event, monitor):
+def tail_log_file(log_path, stop_event):
     last_pos = 0
-    # Wait for file to exist
-    while not os.path.exists(log_path) and not stop_event.is_set():
-        time.sleep(1.0)
-    
-    if os.path.exists(log_path): last_pos = os.path.getsize(log_path)
-    
     while not stop_event.is_set():
-        try:
-            if os.path.exists(log_path):
+        if os.path.exists(log_path):
+            try:
                 curr_size = os.path.getsize(log_path)
                 if last_pos > curr_size: last_pos = 0
                 if curr_size > last_pos:
@@ -240,264 +388,172 @@ def tail_log_file(log_path, stop_event, monitor):
                             line = line.strip()
                             if not line: continue
                             
-                            # Log Format: 2026-02-21 18:12:49,522 [INFO] [yt-dlp-wrapper] --- MSG ---
-                            # Regex to strip the timestamp, level and name to keep it clean
-                            clean_msg = re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[[^\]]+\] \[[^\]]+\] ', '', line)
-                            full_msg = f"[Redirector] {clean_msg}"
+                            # Extremely robust cleaning: Strip leading timestamps and bracketed metadata
+                            # Matches '2026-02-23 19:15:09,842 [INFO] [yt-dlp-wrapper] '
+                            clean_msg = re.sub(r'^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2},\d{3}\s\[.*?\]\s\[.*?\]\s', '', line)
+                            
+                            # Secondary fallback: If the regex didn't change anything, try splitting by the last ']'
+                            if clean_msg == line and ']' in line:
+                                parts = line.split('] ')
+                                if len(parts) >= 2: clean_msg = parts[-1]
 
+                            full_msg = f"[Redirector] {clean_msg}"
+                            
+                            # Detect level from the raw line
                             if "[ERROR]" in line: logger.error(full_msg)
                             elif "[WARNING]" in line: logger.warning(full_msg)
                             elif "[DEBUG]" in line: logger.debug(full_msg)
                             else: logger.info(full_msg)
-
-                            if "WINNER: Tier" in line:
-                                m = re.search(r'Tier (\d+)', line)
-                                if m: monitor.last_winner_tier = int(m.group(1))
                         last_pos = f.tell()
-        except: pass
-        time.sleep(1.0)
+            except: pass
+        time.sleep(0.5)
 
 def get_patch_state():
     target_hash = calculate_sha256(TARGET_YTDLP_PATH)
     source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
     wrapper_hash = calculate_sha256(source_wrapper_path)
-    
-    if not wrapper_hash:
-        return PatchState.BROKEN
-
-    if target_hash and target_hash == wrapper_hash:
-        return PatchState.ENABLED
-    
+    if not wrapper_hash: return PatchState.BROKEN
+    if target_hash and target_hash == wrapper_hash: return PatchState.ENABLED
     return PatchState.DISABLED
-
-def get_process_using_file(filepath):
-    """Attempts to find which process is using a file. Primarily checks for VRChat or yt-dlp."""
-    try:
-        filename = os.path.basename(filepath)
-        # Check for processes with the same name first
-        proc = subprocess.Popen(['tasklist', '/FI', f"IMAGENAME eq {filename}", '/FO', 'CSV', '/NH'], 
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        out, _ = proc.communicate()
-        if filename.lower() in out.lower():
-            return f"Found active process: {filename}"
-        
-        # Check for VRChat
-        proc = subprocess.Popen(['tasklist', '/FI', "IMAGENAME eq VRChat.exe", '/FO', 'CSV', '/NH'], 
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        out, _ = proc.communicate()
-        if "VRChat.exe" in out:
-            return "VRChat.exe is running (likely holding a handle)"
-            
-    except Exception: pass
-    return "Unknown process (check Task Manager)"
 
 def enable_patch(file_list):
     for attempt in range(3):
         try:
-            if not os.path.exists(SOURCE_WRAPPER_DIR):
-                logger.error(f"Source folder missing: {SOURCE_WRAPPER_DIR}")
-                return False
-
             if not os.path.exists(VRCHAT_TOOLS_DIR): os.makedirs(VRCHAT_TOOLS_DIR)
-            
-            # 1. Sync wrapper files
             shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
-            
-            # 2. Backup if target is original
             source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
             wh = calculate_sha256(source_wrapper_path)
-            
             if os.path.exists(TARGET_YTDLP_PATH):
                 th = calculate_sha256(TARGET_YTDLP_PATH)
                 if th and wh and th != wh:
-                    logger.info(f"Backing up original yt-dlp.exe (Hash: {th[:8]}...)")
+                    logger.info("[System] Backing up original yt-dlp.exe")
                     shutil.copy2(TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH)
-            
-            # 3. Swap in wrapper
             shutil.copy2(os.path.join(VRCHAT_TOOLS_DIR, WRAPPER_EXE_NAME), TARGET_YTDLP_PATH)
-            
-            # Final Verify
-            final_hash = calculate_sha256(TARGET_YTDLP_PATH)
-            if final_hash == wh:
-                logger.info("Patch ENABLED and verified.")
+            if calculate_sha256(TARGET_YTDLP_PATH) == wh:
+                logger.info("[System] Patch ENABLED and verified.")
                 return True
-            else:
-                logger.error("Patch verification failed after copy!")
-                return False
-        except PermissionError as e:
-            if e.winerror == 32:
-                culprit = get_process_using_file(TARGET_YTDLP_PATH)
-                logger.warning(f"File locked (Attempt {attempt+1}/3): {culprit}")
-                if attempt < 2: 
-                    time.sleep(1.0)
-                    continue
-            logger.error(f"Enable failed: {e}")
-        except Exception as e: 
-            logger.error(f"Enable failed: {e}")
-            break
+        except: time.sleep(1.0)
     return False
 
 def disable_patch(file_list):
-    for attempt in range(3):
-        try:
-            # 1. Restore original yt-dlp.exe
-            if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                logger.info("Restoring original yt-dlp.exe...")
-                shutil.copy2(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH)
-            
-            # 2. Remove wrapper-specific files
-            logger.info("Cleaning up proxy files from Tools folder...")
-            for filename in file_list:
-                # Never delete the target yt-dlp.exe (we just restored it) 
-                # or the original backup (we might delete it later)
-                if filename.lower() in [TARGET_EXE_NAME.lower(), ORIGINAL_EXE_NAME.lower()]:
-                    continue
-                    
-                path = os.path.join(VRCHAT_TOOLS_DIR, filename)
-                if os.path.exists(path):
-                    try:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path, ignore_errors=True)
-                        else:
-                            os.remove(path)
-                    except Exception as e:
-                        logger.debug(f"Failed to remove {filename}: {e}")
-
-            # 3. Clean up the backup file if we restored successfully
-            if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
-                try: os.remove(ORIGINAL_YTDLP_BACKUP_PATH)
+    try:
+        if os.path.exists(ORIGINAL_YTDLP_BACKUP_PATH):
+            shutil.copy2(ORIGINAL_YTDLP_BACKUP_PATH, TARGET_YTDLP_PATH)
+        for filename in file_list:
+            if filename.lower() in [TARGET_EXE_NAME.lower(), ORIGINAL_EXE_NAME.lower()]: continue
+            path = os.path.join(VRCHAT_TOOLS_DIR, filename)
+            if os.path.exists(path):
+                try:
+                    if os.path.isdir(path): shutil.rmtree(path, ignore_errors=True)
+                    else: os.remove(path)
                 except: pass
-            
-            # 4. Clean up logs and transient state
-            cleanup_targets = [WRAPPER_STATE_PATH, REDIRECTOR_LOG_PATH]
-            for target in cleanup_targets:
-                if target and os.path.exists(target):
-                    try: os.remove(target)
-                    except: pass
-            
-            # 5. Remove any leftover _tmp directories from bundled tools
-            try:
-                for tmp_dir in glob.glob(os.path.join(VRCHAT_TOOLS_DIR, "_tmp*")):
-                    if os.path.isdir(tmp_dir):
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
-            except: pass
-
-            logger.info("Patch DISABLED (Original state restored).")
-            return True
-        except PermissionError as e:
-            if e.winerror == 32:
-                culprit = get_process_using_file(TARGET_YTDLP_PATH)
-                logger.warning(f"File locked during cleanup (Attempt {attempt+1}/3): {culprit}")
-                if attempt < 2:
-                    time.sleep(0.7)
-                    continue
-            logger.error(f"Disable failed: {e}")
-        except Exception as e: 
-            logger.error(f"Disable failed: {e}")
-            break
-    return False
+        cleanup_targets = [WRAPPER_STATE_PATH, REDIRECTOR_LOG_PATH, ORIGINAL_YTDLP_BACKUP_PATH]
+        for target in cleanup_targets:
+            if target and os.path.exists(target):
+                try: os.remove(target)
+                except: pass
+        logger.info("[System] Patch DISABLED (Original state restored).")
+        return True
+    except: return False
 
 def main():
     global CONFIG, VRCHAT_LOG_DIR, VRCHAT_TOOLS_DIR, TARGET_YTDLP_PATH, ORIGINAL_YTDLP_BACKUP_PATH, REDIRECTOR_LOG_PATH, WRAPPER_STATE_PATH
     
-    # --- SINGLETON CHECK ---
     if platform.system() == 'Windows':
-        # Create a named mutex to ensure only one instance runs
-        mutex_name = "Global\\WKYoutubeProxy_Patcher_Mutex"
+        mutex_name = r"Global\VRCYTProxy_Patcher_Mutex"
         kernel32 = ctypes.windll.kernel32
         mutex = kernel32.CreateMutexW(None, False, mutex_name)
-        last_error = kernel32.GetLastError()
-        
-        if last_error == 183: # ERROR_ALREADY_EXISTS
-            print("\n[CRITICAL] Another instance of WKYoutubeProxy is already running.")
-            print("Please close the existing instance before starting a new one.\n")
-            time.sleep(3)
-            sys.exit(1)
-        # We don't need to close the mutex handle here; it will stay alive as long as the process is alive.
+        if kernel32.GetLastError() == 183:
+            print("\n[CRITICAL] VRCYTProxy is already running.\n")
+            time.sleep(3); sys.exit(1)
 
     CONFIG = load_config(os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME))
     VRCHAT_LOG_DIR = get_vrchat_log_dir()
+    if not VRCHAT_LOG_DIR:
+        print("VRChat log directory not found!")
+        time.sleep(5); sys.exit(1)
+        
     VRCHAT_TOOLS_DIR = os.path.join(VRCHAT_LOG_DIR, 'Tools')
     TARGET_YTDLP_PATH = os.path.join(VRCHAT_TOOLS_DIR, TARGET_EXE_NAME)
     ORIGINAL_YTDLP_BACKUP_PATH = os.path.join(VRCHAT_TOOLS_DIR, ORIGINAL_EXE_NAME)
     REDIRECTOR_LOG_PATH = os.path.join(VRCHAT_TOOLS_DIR, REDIRECTOR_LOG_NAME)
     WRAPPER_STATE_PATH = os.path.join(VRCHAT_TOOLS_DIR, 'wrapper_state.json')
 
-    # --- SESSION START: Clear transient state ---
-    logger.info("Initializing fresh session state...")
-    
-    # Wipe Redirector log for a fresh start
     if os.path.exists(REDIRECTOR_LOG_PATH):
         try: os.remove(REDIRECTOR_LOG_PATH)
         except: pass
-
     update_wrapper_state(WRAPPER_STATE_PATH, active_player='unknown')
 
     with open(WRAPPER_FILE_LIST_PATH, 'r') as f: file_list = json.load(f)
     stop_event = threading.Event(); monitor = LogMonitor()
     
-    # Start thread to monitor wrapper log
-    threading.Thread(target=tail_log_file, args=(REDIRECTOR_LOG_PATH, stop_event, monitor), daemon=True).start()
+    threading.Thread(target=tail_log_file, args=(REDIRECTOR_LOG_PATH, stop_event), daemon=True).start()
     
-    # Start thread to monitor VRChat log
     def vrc_monitor_loop():
         while not stop_event.is_set():
             logs = glob.glob(os.path.join(VRCHAT_LOG_DIR, 'output_log_*.txt'))
             if logs: monitor.update_log_file(max(logs, key=os.path.getmtime))
             monitor.tick()
+            ui_state.world = monitor.last_instance_type
+            try:
+                if os.path.exists(WRAPPER_STATE_PATH):
+                    with open(WRAPPER_STATE_PATH, 'r') as f:
+                        s = json.load(f); ui_state.engine = s.get('active_player', 'unknown')
+            except: pass
             time.sleep(0.5)
-    
     threading.Thread(target=vrc_monitor_loop, daemon=True).start()
 
     atexit.register(lambda: [job_manager.close(), disable_patch(file_list)])
-    
-    # Robust signal handling
     def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}. Exiting cleanly...")
-        disable_patch(file_list)
-        job_manager.close()
-        sys.exit(0)
+        disable_patch(file_list); job_manager.close(); sys.exit(0)
+    signal.signal(signal.SIGINT, signal_handler); signal.signal(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    if platform.system() == 'Windows':
-        # Use ctypes to avoid pywin32 dependency while catching console close
-        PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
-        
-        def console_ctrl_handler(ctrl_type):
-            # 2 = CTRL_CLOSE_EVENT, 5 = CTRL_LOGOFF_EVENT, 6 = CTRL_SHUTDOWN_EVENT
-            if ctrl_type in [2, 5, 6]:
-                # We must be very fast here, Windows only gives a few seconds
-                disable_patch(file_list)
-                job_manager.close()
-                return True
-            return False
-
-        # Keep a reference to the handler to prevent garbage collection
-        _handler = PHANDLER_ROUTINE(console_ctrl_handler)
-        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True):
-            logger.debug("Failed to set Console Control Handler.")
-
-    logger.info("Monitoring VRChat for world changes...")
-    
-    while True:
-        # Decision Logic
-        force_patch = CONFIG.get("force_patch_in_public", False)
-        should_be_enabled = force_patch or (monitor.last_instance_type not in ['public', 'group_public'])
-        
-        current_state = get_patch_state()
-        
-        if should_be_enabled and current_state != PatchState.ENABLED:
-            enable_patch(file_list)
-        elif not should_be_enabled and current_state == PatchState.ENABLED:
-            disable_patch(file_list)
+    with Live(screen=True, refresh_per_second=10) as live:
+        while True:
+            # 1. Update Layout (Handles Resizing)
+            layout = make_layout()
             
-        # Periodic Health Check
-        if current_state == PatchState.ENABLED:
-            check_wrapper_health(file_list, VRCHAT_TOOLS_DIR, SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
+            # Safe update of layout sections
+            try: layout["header"].update(Header())
+            except KeyError: pass
             
-        time.sleep(POLL_INTERVAL)
+            try: layout["body"].update(ActivityLog())
+            except KeyError: pass
+            
+            try: layout["footer"].update(Footer())
+            except KeyError: pass
+            
+            live.update(layout)
+
+            # 2. Handle Input (Non-blocking)
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b'\x00' or key == b'\xe0': # Special key prefix
+                    key = msvcrt.getch()
+                    if key == b'H': ui_state.scroll(-1)   # Up
+                    elif key == b'P': ui_state.scroll(1)  # Down
+                    elif key == b'I': ui_state.scroll(-10) # PgUp
+                    elif key == b'G': ui_state.scroll(10)  # PgDn
+
+            # 2. Logic & States
+            should_be_enabled = CONFIG.get("force_patch_in_public", False) or (monitor.last_instance_type not in ['public', 'group_public'])
+            current_state = get_patch_state()
+            
+            if should_be_enabled:
+                ui_state.status = "System Active"
+                if current_state != PatchState.ENABLED:
+                    ui_state.status = "Applying Patch..."
+                    enable_patch(file_list)
+            else:
+                ui_state.status = "Idle (Public)"
+                if current_state == PatchState.ENABLED:
+                    ui_state.status = "Removing Patch..."
+                    disable_patch(file_list)
+            
+            if current_state == PatchState.ENABLED:
+                check_wrapper_health(file_list, VRCHAT_TOOLS_DIR, SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
+            
+            time.sleep(0.05) # Faster poll for snappy input
 
 if __name__ == '__main__':
     main()

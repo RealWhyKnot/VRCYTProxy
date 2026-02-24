@@ -24,7 +24,7 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
         env['TEMP'] = temp_dir
         
         cmd = [path] + args
-        logger.debug(f"Launching {executable_name}: {' '.join(cmd)}")
+        logger.debug(f"Executing: {' '.join(cmd)}")
         
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
@@ -35,11 +35,13 @@ def attempt_executable(path, executable_name, args, app_base_path, timeout=10.0)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
             if process.returncode == 0: return stdout.strip(), 0
-            logger.debug(f"{executable_name} FAILED (Code {process.returncode}). Stderr: {stderr.strip()}")
+            
+            # Use debug for technical failures
+            logger.debug(f"Process {executable_name} FAILED (Code {process.returncode}). Stderr: {stderr.strip()}")
             return None, process.returncode
         except subprocess.TimeoutExpired:
             process.kill()
-            logger.debug(f"{executable_name} TIMED OUT.")
+            logger.debug(f"Process {executable_name} TIMED OUT.")
             return None, -1
     except Exception: return None, 1
 
@@ -61,11 +63,17 @@ def resolve_via_proxy(target_url, incoming_args, res_timeout, custom_ua, remote_
         with urllib.request.urlopen(req, timeout=res_timeout, context=ssl_context) as response:
             if response.status == 200:
                 body = response.read().decode()
-                logger.debug(f"Proxy Response: {body}")
-                data = json.loads(body)
-                url = data.get("stream_url") or data.get("url")
-                if url: return url
-                logger.debug(f"Proxy returned success but no URL field.")
+                if body.strip().startswith("<!DOCTYPE") or "<html" in body.lower():
+                    logger.debug("Proxy returned HTML instead of JSON (likely Smart Routing page).")
+                    return None
+                
+                try:
+                    data = json.loads(body)
+                    url = data.get("stream_url") or data.get("url")
+                    if url: return url
+                    logger.debug("Proxy result missing URL field.")
+                except json.JSONDecodeError:
+                    logger.debug(f"Failed to decode proxy JSON. Body starts with: {body[:50]}")
             else:
                 logger.debug(f"Proxy returned HTTP {response.status}")
     except Exception as e:

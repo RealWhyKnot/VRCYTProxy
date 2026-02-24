@@ -41,7 +41,7 @@ def verify_stream(url, timeout=5.0, depth=0, user_agent=None):
                 status = resp.getcode()
                 content_type = resp.headers.get('Content-Type', '').lower()
                 
-                logger.debug(f"[Verifier] HEAD {status} - Type: {content_type} - URL: {url[:60]}...")
+                logger.debug(f"[Verifier] HEAD {status} - Type: {content_type}")
 
                 # If it's a direct video/audio type, we're likely good
                 if any(x in content_type for x in ['video/', 'audio/', 'application/octet-stream', 'mpegurl', 'application/dash+xml']):
@@ -49,14 +49,14 @@ def verify_stream(url, timeout=5.0, depth=0, user_agent=None):
                     
                 # If it's HTML, it's almost certainly a fail (login page, 404 page, etc.)
                 if 'text/html' in content_type:
-                    logger.debug(f"[Verifier] Rejected: Result is HTML.")
+                    logger.debug(f"Stream verification rejected: Content-Type is HTML.")
                     return False
         except urllib.error.HTTPError as e:
             # Some CDNs return 403 or 405 for HEAD. We fallback to GET.
             if e.code not in [403, 405]:
-                logger.debug(f"[Verifier] HEAD failed with HTTP {e.code}")
+                logger.debug(f"HEAD check failed: HTTP {e.code}")
                 return False
-            logger.debug(f"[Verifier] HEAD returned {e.code}, falling back to GET Range.")
+            logger.debug(f"[Verifier] HEAD returned {e.code}, using GET Range fallback.")
 
         # 2. Manifest/Stream Deep Check (GET)
         req_get = urllib.request.Request(url, method='GET', headers=headers)
@@ -75,33 +75,33 @@ def verify_stream(url, timeout=5.0, depth=0, user_agent=None):
                         for line in lines:
                             if not line.startswith('#'):
                                 next_url = urljoin(url, line)
-                                logger.debug(f"[Verifier] HLS Master found, checking variant: {next_url[:60]}...")
                                 return verify_stream(next_url, timeout, depth + 1, ua)
                 return True
                 
             # If it's not a manifest but we got data and it's not HTML, consider it verified
             if len(content) > 0 and '<HTML' not in content_upper and '<!DOCTYPE' not in content_upper:
-                logger.debug(f"[Verifier] GET Success: Binary data found ({len(content)} bytes).")
                 return True
-            else:
-                logger.debug(f"[Verifier] GET Failed: Data contains HTML or is empty.")
 
     except Exception as e: 
-        logger.debug(f"[Verifier] Exception: {e}")
+        logger.debug(f"Verification Exception: {e}")
     
     return False
 
 def verify_stream_with_ytdlp(ytdlp_path, url, timeout=15.0):
     """
     Uses the actual yt-dlp binary to verify if a URL is playable.
+    Returns: True (Success), False (Failed), None (Binary doesn't support validation flags)
     """
-    if not os.path.exists(ytdlp_path): 
-        logger.debug(f"[Verifier] Binary missing: {ytdlp_path}")
-        return False
+    if not os.path.exists(ytdlp_path): return False
     try:
-        # --simulate --check-formats is the most accurate check yt-dlp has for actual playability
-        cmd = [ytdlp_path, "--no-warnings", "--ignore-errors", "--simulate", "--check-formats", url]
-        logger.debug(f"[Verifier] Launching binary check: {' '.join(cmd)}")
+        # Use --get-url as it implies --simulate and is widely supported
+        cmd = [ytdlp_path, "--get-url", url]
+        
+        # Modern yt-dlp supports more quiet/safe flags
+        if "latest" in ytdlp_path.lower():
+            cmd = [ytdlp_path, "--no-warnings", "--ignore-errors", "--get-url", url]
+
+        logger.debug(f"Running binary verification: {' '.join(cmd)}")
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW
@@ -109,16 +109,21 @@ def verify_stream_with_ytdlp(ytdlp_path, url, timeout=15.0):
         job_manager.assign(process)
         try:
             stdout, stderr = process.communicate(timeout=timeout)
-            if process.returncode == 0:
-                logger.debug("[Verifier] Binary check PASSED.")
+            err_text = stderr.decode(errors='ignore').lower()
+            
+            if process.returncode == 0 and stdout.strip():
                 return True
-            else:
-                logger.debug(f"[Verifier] Binary check FAILED (Code {process.returncode}). Stderr: {stderr.decode(errors='ignore').strip()}")
-                return False
+            
+            # If binary doesn't support --get-url (very unlikely), fallback
+            if "no such option" in err_text and "--get-url" in err_text:
+                logger.debug(f"[Verifier] Binary {os.path.basename(ytdlp_path)} doesn't support --get-url.")
+                return None
+                
+            logger.debug(f"[Verifier] Binary check failed ({process.returncode}): {err_text.strip()}")
+            return False
         except subprocess.TimeoutExpired:
             process.kill()
-            logger.debug("[Verifier] Binary check TIMED OUT.")
             return False
     except Exception as e: 
-        logger.debug(f"[Verifier] Binary check EXCEPTION: {e}")
+        logger.debug(f"Binary check exception: {e}")
         return False

@@ -231,8 +231,14 @@ try {
 
     Write-Host "Installing PyInstaller from source (this may take a few minutes)..." -ForegroundColor Yellow
     # Using --progress-bar on and direct execution to avoid conda run hangs
-    & $VenvPip install --force-reinstall --no-binary pyinstaller pyinstaller --progress-bar on
+    & $VenvPip install --force-reinstall --no-binary pyinstaller pyinstaller --progress-bar on --quiet
     
+    Write-Host "Installing patcher requirements..." -ForegroundColor Yellow
+    $PatcherReqs = Join-Path $SrcPatcherDir "requirements.txt"
+    if (Test-Path $PatcherReqs) {
+        & $VenvPip install -r "$PatcherReqs" --quiet
+    }
+
     Write-Host "Dependencies installed (PyInstaller bootloader recompiled)."
 
     Write-Host "[3/6] Starting build process..." -ForegroundColor Green
@@ -315,13 +321,36 @@ try {
         "--workpath", $PatcherWorkDir,
         "--specpath", $BuildDir,
         "--name", "patcher",
-        "--paths", $SrcPatcherDir
+        "--paths", $SrcPatcherDir,
+        "--collect-submodules", "rich"
     )
     if ($IconArg) { $PatcherArgs += $IconArg }
     $PatcherArgs += (Join-Path $SrcPatcherDir "main.py")
 
     & $CondaCmd run -n $CondaEnvName python -m PyInstaller @PatcherArgs
+
+    Write-Host "[4.5/6] Smoke Testing built executables..." -ForegroundColor Green
+    $PatcherExeDir = Join-Path $PatcherBuildDir "patcher"
+    $PatcherExe = Join-Path $PatcherExeDir "patcher.exe"
+    
+    if (Test-Path $PatcherExe) {
+        # Copy required files for smoke test to work
+        Copy-Item $WrapperFileListJson -Destination $PatcherExeDir -Force
+        Copy-Item -Recurse $ResourcesDir -Destination $PatcherExeDir -Force
         
+        Write-Host "   -> Starting patcher.exe for stability check (5s)..." -NoNewline
+        $SmokeProc = Start-Process -FilePath $PatcherExe -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        if ($SmokeProc.HasExited) {
+            Write-Host " FAILED" -ForegroundColor Red
+            Write-Host "[CRITICAL] Patcher crashed during smoke test! Exit Code: $($SmokeProc.ExitCode)" -ForegroundColor Red
+            exit 1
+        } else {
+            Stop-Process -Id $SmokeProc.Id -Force
+            Write-Host " PASSED" -ForegroundColor Gray
+        }
+    }
+
     if ($Version -and (Test-Path $VersionFile)) { 
         Remove-Item $VersionFile 
         Write-Host "   -> Cleaned up temporary version file."

@@ -45,6 +45,12 @@ def check_wrapper_health(wrapper_file_list, tools_dir, source_dir, wrapper_exe_n
             if corrupted_files: reason.append(f"non-functional: {', '.join(corrupted_files)}")
             logger.info(f"Health Check failed ({' and '.join(reason)}). Restoring components...")
             shutil.copytree(source_dir, tools_dir, dirs_exist_ok=True)
+            
+            # Re-sync config after restore
+            local_config = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(source_dir))), "patcher_config.json")
+            if os.path.exists(local_config):
+                shutil.copy2(local_config, os.path.join(tools_dir, "patcher_config.json"))
+            
             return True
     except Exception as e:
         logger.debug(f"Health check failed: {e}")

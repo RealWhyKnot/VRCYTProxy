@@ -365,6 +365,7 @@ def load_config(config_path):
         "enable_tier1_proxy": True,
         "enable_tier2_modern": True,
         "enable_tier3_native": True,
+        "enable_tier4_recovery": True,
         "failure_retry_window": 60,
         "video_error_patterns": [
             "Video Error: Error (3): Video player error: Source not supported",
@@ -379,7 +380,8 @@ def load_config(config_path):
         }
     }
     
-    if not os.path.exists(config_path):
+    config_exists = os.path.exists(config_path)
+    if not config_exists:
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(defaults, f, indent=4)
@@ -389,9 +391,17 @@ def load_config(config_path):
     try:
         with open(config_path, 'r', encoding='utf-8-sig') as f:
             user_config = json.load(f)
-            # Ensure all keys exist
+            
+            # Diagnostic: Log non-default settings
+            overrides = []
             for k, v in defaults.items():
+                if k in user_config and user_config[k] != v:
+                    overrides.append(f"{k}={user_config[k]}")
                 if k not in user_config: user_config[k] = v
+            
+            if overrides:
+                logger.info(f"[System] Config Overrides: {', '.join(overrides)}")
+            
             return user_config
     except:
         return defaults
@@ -513,6 +523,12 @@ def enable_patch(file_list):
         try:
             if not os.path.exists(VRCHAT_TOOLS_DIR): os.makedirs(VRCHAT_TOOLS_DIR)
             shutil.copytree(SOURCE_WRAPPER_DIR, VRCHAT_TOOLS_DIR, dirs_exist_ok=True)
+            
+            # Synchronize config to Tools folder
+            local_config = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
+            if os.path.exists(local_config):
+                shutil.copy2(local_config, os.path.join(VRCHAT_TOOLS_DIR, CONFIG_FILE_NAME))
+
             source_wrapper_path = os.path.join(SOURCE_WRAPPER_DIR, WRAPPER_EXE_NAME)
             wh = calculate_sha256(source_wrapper_path)
             if os.path.exists(TARGET_YTDLP_PATH):

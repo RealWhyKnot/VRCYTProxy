@@ -56,6 +56,7 @@ DEFAULT_CONFIG = {
     "enable_tier1_proxy": True,
     "enable_tier2_modern": True,
     "enable_tier3_native": True,
+    "enable_tier4_recovery": True,
     "debug_mode": BUILD_TYPE == "DEV"
 }
 
@@ -91,8 +92,17 @@ def load_config():
                 mapping = {"enable_tier1_modern": "enable_tier2_modern", "enable_tier2_proxy": "enable_tier1_proxy"}
                 for old, new in mapping.items():
                     if old in user_config and new not in user_config: user_config[new] = user_config[old]
+                
+                overrides = []
                 for k, v in DEFAULT_CONFIG.items():
+                    if k in user_config and user_config[k] != v:
+                        overrides.append(f"{k}={user_config[k]}")
                     if k not in user_config: user_config[k] = v
+                
+                if overrides:
+                    # Global logger may not be initialized yet, so we return it to be logged after init
+                    user_config["_overrides"] = overrides
+                    
                 return user_config
         except: pass
     return DEFAULT_CONFIG
@@ -265,13 +275,14 @@ def process_and_execute(incoming_args):
                 logger.debug("Tier 3 failed verification.")
 
         # TIER 4: RECOVERY PROXY
-        logger.warning("Emergency Tier 4 (Recovery)...")
-        res = resolve_tier_1_proxy(target_url, incoming_args, 15.0, custom_ua, REMOTE_BASE, player_hint)
-        if res and res.get('url') and verify_stream(res['url'], timeout=8.0, user_agent=custom_ua):
-            elapsed = time.time() - start_time
-            logger.info(f"Tier 4 SUCCESS. (Total: {elapsed:.2f}s)")
-            update_wrapper_success(target_url, res['url'], 4)
-            safe_print(res['url']); return 0
+        if CONFIG.get("enable_tier4_recovery", True):
+            logger.warning("Emergency Tier 4 (Recovery)...")
+            res = resolve_tier_1_proxy(target_url, incoming_args, 15.0, custom_ua, REMOTE_BASE, player_hint)
+            if res and res.get('url') and verify_stream(res['url'], timeout=8.0, user_agent=custom_ua):
+                elapsed = time.time() - start_time
+                logger.info(f"Tier 4 SUCCESS. (Total: {elapsed:.2f}s)")
+                update_wrapper_success(target_url, res['url'], 4)
+                safe_print(res['url']); return 0
 
         logger.error(f"FATAL: All resolution tiers failed for: {target_url}")
         return 1
@@ -285,6 +296,11 @@ def main():
         global logger, CONFIG
         CONFIG = load_config()
         logger = setup_logging(CONFIG.get("debug_mode", BUILD_TYPE == "DEV"))
+        
+        overrides = CONFIG.get("_overrides")
+        if overrides:
+            logger.info(f"Config Overrides: {', '.join(overrides)}")
+            
         sys.exit(process_and_execute(sys.argv[1:]))
     except Exception as e:
         sys.stderr.write(f"FATAL MAIN: {e}\n"); sys.exit(1)

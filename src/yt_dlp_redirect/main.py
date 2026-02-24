@@ -48,7 +48,8 @@ CONFIG_PATH = os.path.join(APP_BASE_PATH, CONFIG_FILE_NAME)
 WRAPPER_STATE_PATH = os.path.join(APP_BASE_PATH, WRAPPER_STATE_NAME)
 
 DEFAULT_CONFIG = {
-    "use_test_version": False,
+    "remote_server_base": "https://whyknot.dev",
+    "domain_branch": "stable", # 'stable' or 'test'
     "preferred_max_height": 1080,
     "failure_retry_window": 60,
     "custom_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -188,8 +189,15 @@ def process_and_execute(incoming_args):
             if res: safe_print(res)
             return code
 
-        domain = "test.whyknot.dev" if CONFIG.get("use_test_version", False) else "whyknot.dev"
-        REMOTE_BASE = f"https://{domain}"; custom_ua = CONFIG.get("custom_user_agent")
+        # Determine the backend server
+        custom_base = CONFIG.get("remote_server_base")
+        if custom_base and "whyknot.dev" not in custom_base:
+            REMOTE_BASE = custom_base.rstrip("/")
+        else:
+            sub = "test." if CONFIG.get("domain_branch", "stable") == "test" else ""
+            REMOTE_BASE = f"https://{sub}whyknot.dev"
+
+        custom_ua = CONFIG.get("custom_user_agent")
         is_legacy = detect_legacy(incoming_args, custom_ua); player_hint = "unity" if is_legacy else "avpro"
 
         logger.info(f"Request: {target_url[:70]}... [{player_hint.upper()}]")

@@ -1,23 +1,16 @@
 {
-  "video_error_patterns": [
-    "[Video Player] Failed to load",
-    "VideoError",
-    "[AVProVideo] Error",
-    "[VideoTXL] Error",
-    "Loading failed"
-  ],
-  "instance_patterns": {
-    "invite": "~private",
-    "friends+": "~hidden",
-    "friends": "~friends",
-    "group_public": "groupAccessType(public)",
-    "group_plus": "groupAccessType(plus)",
-    "group": "~group"
-  },
-  "proxy_domain": "whyknot.dev",
-  "debug_mode": true,
-  "force_patch_in_public": false,
-  "auto_update_check": true,
-  "wrapper_version": "v2026.02.20.dev-production-f187016",
-  "vrchat_log_dir": "C:\\Users\\ADMIN\\AppData\\LocalLow\\VRChat\\VRChat"
+    "vrchat_log_dir": null,
+    "force_patch_in_public": false,
+    "debug_mode": false,
+    "video_error_patterns": [
+        "Video Error: Error (3): Video player error: Source not supported",
+        "Video Error: Error (3): Video player error: Failed to resolve URL",
+        "Video Error: Error (3): Video player error: Stream not found"
+    ],
+    "instance_patterns": {
+        "invite": "~private|~canRequestInvite",
+        "friends+": "~hidden",
+        "friends": "~friends",
+        "group": "~group"
+    }
 }
